@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hex Viewer</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  width: 100%; height: 100%;
+  overflow: hidden;
+  background: #111a24;
+  font-family: monospace;
+  color: #c8d8e8;
+}
+
+#app { display: flex; flex-direction: column; width: 100%; height: 100%; }
+
+#toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  background: #162030;
+  border-bottom: 1px solid #253545;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.title { color: #6ab0d8; font-weight: bold; letter-spacing: .05em; white-space: nowrap; }
+
+.sep { width: 1px; height: 18px; background: #2d4050; flex-shrink: 0; }
+
+.group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+label { display: flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; white-space: nowrap; }
+
+select {
+  background: #0e1c28;
+  color: #c8d8e8;
+  border: 1px solid #2d4050;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-family: monospace;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+button {
+  background: #0e1c28;
+  color: #c8d8e8;
+  border: 1px solid #2d4050;
+  padding: 3px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: monospace;
+  font-size: 13px;
+  white-space: nowrap;
+}
+button:hover { background: #1a2d40; border-color: #4a6a88; }
+
+/* Colour swatch inputs */
+input[type=color] {
+  width: 22px; height: 22px;
+  border: 1px solid #2d4050;
+  border-radius: 3px;
+  padding: 0;
+  cursor: pointer;
+  background: none;
+  vertical-align: middle;
+}
+
+#rot-val {
+  min-width: 3.8em;
+  text-align: center;
+  color: #6ab0d8;
+  font-size: 13px;
+}
+
+#status {
+  margin-left: auto;
+  color: #4a6a88;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+#canvas-wrap { flex: 1; overflow: hidden; position: relative; }
+
+#map-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: grab;
+  touch-action: none;
+}
+#map-canvas:active { cursor: grabbing; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="toolbar">
+    <span class="title">HexViewer</span>
+
+    <div class="sep"></div>
+
+    <!-- Layer toggles -->
+    <div class="group">
+      <label><input type="checkbox" id="chk-outline" checked> Outlines</label>
+      <label><input type="checkbox" id="chk-label"   checked> Numbers</label>
+      <label><input type="checkbox" id="chk-dot"     checked> Dots</label>
+      <label><input type="checkbox" id="chk-color">          Colors</label>
+    </div>
+
+    <div class="sep"></div>
+
+    <!-- Colour pickers -->
+    <div class="group">
+      <label title="Canvas background"><input type="color" id="col-bg"     value="#f0ede0"> BG</label>
+      <label title="Hex border colour"><input type="color" id="col-border" value="#556677"> Border</label>
+      <label title="Hex number colour"><input type="color" id="col-number" value="#223344"> Number</label>
+      <label title="Centre dot colour"><input type="color" id="col-dot"    value="#334455"> Dot</label>
+    </div>
+
+    <div class="sep"></div>
+
+    <!-- Hex grid options -->
+    <div class="group">
+      <label>Orient
+        <select id="sel-orient">
+          <option value="pointy">Pointy-top</option>
+          <option value="flat">Flat-top</option>
+        </select>
+      </label>
+      <label>Origin
+        <select id="sel-origin">
+          <option value="top-left">Top-left</option>
+          <option value="bottom-left">Bottom-left</option>
+        </select>
+      </label>
+      <label>Parity
+        <select id="sel-parity">
+          <option value="odd">Odd</option>
+          <option value="even">Even</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="sep"></div>
+
+    <!-- Rotation -->
+    <div class="group">
+      <button id="btn-ccw">↺ CCW</button>
+      <span id="rot-val">0°</span>
+      <button id="btn-cw">↻ CW</button>
+      <label>Step
+        <select id="sel-rotstep">
+          <option value="45">45°</option>
+          <option value="60" selected>60°</option>
+          <option value="90">90°</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="sep"></div>
+
+    <button id="btn-fit">Fit</button>
+
+    <span id="status">hover over a hex</span>
+  </div>
+
+  <div id="canvas-wrap">
+    <canvas id="map-canvas"></canvas>
+  </div>
+</div>
+
+<script src="src/hexviewer.js"></script>
+<script>
+(function () {
+  const { HexMap, Layer, Geometry, FLAT_TOP, POINTY_TOP, OFFSET_ODD, OFFSET_EVEN } = window.HexViewer;
+
+  // ── Sample custom layer: random pastel fills ────────────────────────────────
+  class ColorLayer extends Layer {
+    constructor(rows, cols) {
+      super('color', false);
+      this._colors = Array.from({ length: rows }, () =>
+        Array.from({ length: cols }, () => `hsl(${(Math.random() * 360) | 0},40%,58%)`)
+      );
+    }
+
+    render(ctx, hexMap, visibleHexes) {
+      const co = hexMap.cornerOffsets;
+      for (const hex of visibleHexes) {
+        ctx.fillStyle = this._colors[hex.row][hex.col];
+        const c = Geometry.hexCorners(hex.cx, hex.cy, co);
+        ctx.beginPath();
+        ctx.moveTo(c[0].x, c[0].y);
+        for (let i = 1; i < 6; i++) ctx.lineTo(c[i].x, c[i].y);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+  }
+
+  const ROWS = 20, COLS = 30;
+  const colorLayer = new ColorLayer(ROWS, COLS);
+  let map = null;
+
+  function applyColors() {
+    map.background = document.getElementById('col-bg').value;
+    map.getLayer('hex-outline').strokeStyle = document.getElementById('col-border').value;
+    map.getLayer('hex-label').fillStyle     = document.getElementById('col-number').value;
+    map.getLayer('center-dot').fillStyle    = document.getElementById('col-dot').value;
+    map.refresh();
+  }
+
+  function buildMap() {
+    const canvas       = document.getElementById('map-canvas');
+    const orientation  = document.getElementById('sel-orient').value === 'flat' ? FLAT_TOP : POINTY_TOP;
+    const originCorner = document.getElementById('sel-origin').value;
+    const offsetParity = document.getElementById('sel-parity').value === 'even' ? OFFSET_EVEN : OFFSET_ODD;
+    const rotationStep = parseInt(document.getElementById('sel-rotstep').value, 10);
+
+    const savedViewport = map ? map.getViewport() : null;
+    if (map) map.destroy();
+
+    map = new HexMap(canvas, {
+      rows: ROWS, cols: COLS, hexSize: 40,
+      orientation, originCorner, offsetParity, rotationStep,
+    });
+
+    // Insert colour layer below the built-ins
+    map.addLayer(colorLayer, 0);
+
+    // Restore checkbox visibility
+    map.setLayerVisible('hex-outline', document.getElementById('chk-outline').checked);
+    map.setLayerVisible('hex-label',   document.getElementById('chk-label').checked);
+    map.setLayerVisible('center-dot',  document.getElementById('chk-dot').checked);
+    map.setLayerVisible('color',       document.getElementById('chk-color').checked);
+
+    // Apply current colour picker values
+    applyColors();
+
+    if (savedViewport) map.setViewport(savedViewport);
+
+    map.on('hexHover', ({ row, col }) => {
+      document.getElementById('status').textContent =
+        `row ${String(row).padStart(2,'0')}  col ${String(col).padStart(2,'0')}  →  ${map.getHexLabel(row, col)}`;
+    });
+
+    map.on('hexClick', ({ row, col }) => {
+      console.log(`hex clicked  row=${row}  col=${col}  label=${map.getHexLabel(row, col)}`);
+    });
+
+    map.on('viewportChange', ({ angle }) => {
+      document.getElementById('rot-val').textContent =
+        `${Math.round((((angle * 180 / Math.PI) % 360) + 360) % 360)}°`;
+    });
+
+    document.getElementById('rot-val').textContent = `${map.getRotation()}°`;
+  }
+
+  // ── Layer checkboxes ─────────────────────────────────────────────────────────
+  document.getElementById('chk-outline').addEventListener('change', e => map.setLayerVisible('hex-outline', e.target.checked));
+  document.getElementById('chk-label').addEventListener('change',   e => map.setLayerVisible('hex-label',   e.target.checked));
+  document.getElementById('chk-dot').addEventListener('change',     e => map.setLayerVisible('center-dot',  e.target.checked));
+  document.getElementById('chk-color').addEventListener('change',   e => map.setLayerVisible('color',       e.target.checked));
+
+  // ── Colour pickers ───────────────────────────────────────────────────────────
+  document.getElementById('col-bg').addEventListener('input',     () => applyColors());
+  document.getElementById('col-border').addEventListener('input', () => applyColors());
+  document.getElementById('col-number').addEventListener('input', () => applyColors());
+  document.getElementById('col-dot').addEventListener('input',    () => applyColors());
+
+  // ── Grid selects ─────────────────────────────────────────────────────────────
+  document.getElementById('sel-orient').addEventListener('change', buildMap);
+  document.getElementById('sel-origin').addEventListener('change', buildMap);
+  document.getElementById('sel-parity').addEventListener('change', buildMap);
+
+  // ── Rotation ─────────────────────────────────────────────────────────────────
+  document.getElementById('btn-cw').addEventListener('click', () => {
+    map.rotateBy(1);
+    document.getElementById('rot-val').textContent = `${map.getRotation()}°`;
+  });
+  document.getElementById('btn-ccw').addEventListener('click', () => {
+    map.rotateBy(-1);
+    document.getElementById('rot-val').textContent = `${map.getRotation()}°`;
+  });
+  document.getElementById('sel-rotstep').addEventListener('change', e => {
+    map.rotationStep = parseInt(e.target.value, 10);
+  });
+
+  // ── Fit ───────────────────────────────────────────────────────────────────────
+  document.getElementById('btn-fit').addEventListener('click', () => {
+    map.fitToView();
+    document.getElementById('rot-val').textContent = `${map.getRotation()}°`;
+  });
+
+  buildMap();
+})();
+</script>
+</body>
+</html>
