@@ -156,6 +156,66 @@ layer.fillStyle = '#334455'
 
 Automatically hidden when the rendered dot would be sub-pixel.
 
+### DomLayer
+
+Base class for layers that live in the DOM overlay rather than the canvas. The overlay is a `pointer-events:none` div that covers the canvas exactly and is unaffected by pan/zoom/rotation.
+
+```js
+class MyOverlay extends HexViewer.DomLayer {
+  constructor() {
+    super('my-overlay');
+    // this.element is a position:absolute div spanning the full canvas area.
+    // Add your own child elements to it.
+    const div = document.createElement('div');
+    div.style.cssText = 'position:absolute;top:10px;left:10px;pointer-events:auto;';
+    div.textContent   = 'Hello';
+    this.element.appendChild(div);
+  }
+}
+map.addLayer(new MyOverlay());
+```
+
+`get element` returns the full-size container div. Set `pointer-events:auto` on individual child elements to make them interactive; the container itself stays passthrough.
+
+### PanelLayer
+
+A pre-styled, positioned panel for game information. Extends `DomLayer`.
+
+```js
+new HexViewer.PanelLayer(name, options)
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `visible` | boolean | `true` | Initial visibility |
+| `position` | object | — | `{ top, right, bottom, left }` — CSS lengths or numbers (px) |
+| `html` | string | — | Initial inner HTML |
+
+```js
+const panel = new HexViewer.PanelLayer('status', {
+  position: { top: 10, right: 10 },
+  html: '<b>Hex info</b>',
+});
+panel.setSize({ width: 180 });
+map.addLayer(panel);
+
+// Update content at any time — no map.refresh() needed
+panel.html = `Row ${row}, Col ${col}`;
+
+// Direct DOM access for arbitrary manipulation
+panel.panelElement.style.background = 'rgba(40,0,0,0.9)';
+panel.panelElement.appendChild(someButtonElement);
+```
+
+```js
+panel.setPosition({ top, right, bottom, left })   // reposition
+panel.setSize({ width, height })                   // resize
+panel.html = '<p>content</p>'                      // set innerHTML
+panel.panelElement                                 // the <div> element
+```
+
+`setLayerVisible('panel-name', bool)` and the `visible` property both update the panel's `display` style immediately — no canvas redraw is triggered.
+
 ### MinimapLayer (`'minimap'`)
 
 An overlay drawn in screen space showing the full map extent and the current viewport position. Supports drag-to-navigate.
@@ -258,24 +318,124 @@ map.addLayer(layer);
 
 | Property | Type | Default | Description |
 |---|---|---|---|
-| `largeScale` | number | 1.15 | Large counter side as a multiple of `hexSize` |
-| `smallScale` | number | 0.85 | Small counter side as a multiple of `hexSize` |
+| `largeScale` | number | `1.15` | Large counter side as a multiple of `hexSize` |
+| `smallScale` | number | `0.85` | Small counter side as a multiple of `hexSize` |
+| `onSelectionChange` | function | `null` | Called with a `Set` of selected ids on every selection change |
+| `onContextMenu` | function | `null` | Called on right-click over a counter — see [Context menu](#context-menu) |
 
 ```js
 layer.addCounter(counter)        // add a Counter instance
-layer.removeCounter(id)          // remove by id
-layer.getSelected()              // returns Set of selected ids
+layer.removeCounter(id)          // remove by id; fires onSelectionChange if it was selected
+layer.getCounter(id)             // returns Counter or null
+layer.getSelected()              // returns snapshot Set of selected ids
+layer.setSelection(ids)          // replace selection with array/iterable of ids
 layer.clearSelection()           // deselect all
 layer.closeWarp()                // collapse warp-out view
 ```
 
 **Stacking:** counters on the same hex are drawn as a stack — large counters below small counters, with a pixel offset to show depth. A badge shows the stack count when more than one counter is present.
 
-**Warp-out:** double-clicking a stack with more than one counter spreads them horizontally above the hex with dashed leader lines. Click any warped counter to select/deselect it. Click outside the warp area to collapse it.
+**Warp-out:** double-clicking a stack with more than one counter spreads them horizontally above the hex with dashed leader lines. While warp is open, all other hex stacks are shown at reduced opacity. The leader line colour automatically contrasts against the map background. Click outside the warp area to collapse it.
 
-**Selection:** clicking the top counter of a stack (or any counter when warped) toggles a yellow selection border. Selection persists across warp open/close.
+**Selection:**
+- **Click** a stack — selects every counter in it, deselects everything else.
+- **Shift-click** a stack — toggles the whole stack (adds all if any are unselected; removes all if all are already selected).
+- **Click** a warped counter — selects only that counter, clears others.
+- **Shift-click** a warped counter — toggles just that counter.
+- The yellow selection border persists across warp open/close.
 
 **3D depth effect:** shadow, highlight bevel, and shadow bevel strips are automatically suppressed when the counter would render smaller than ~14 CSS pixels wide.
+
+### Selection change callback
+
+`onSelectionChange(ids)` fires after every selection mutation. `ids` is a snapshot `Set` of the currently selected counter ids.
+
+```js
+layer.onSelectionChange = (ids) => {
+  if (ids.size === 0) {
+    panel.visible = false;
+    return;
+  }
+  const counters = [...ids].map(id => layer.getCounter(id));
+  panel.html = counters.map(c =>
+    `<div>${c.id} — ${c.size} at hex ${map.getHexLabel(c.row, c.col)}</div>`
+  ).join('');
+  panel.visible = true;
+};
+```
+
+### Context menu
+
+`onContextMenu(counter, stack, clientX, clientY)` fires when the user right-clicks a counter. `counter` is the specific counter clicked; `stack` is the full array of counters on that hex; `clientX`/`clientY` are viewport coordinates for positioning the menu.
+
+```js
+layer.onContextMenu = (counter, stack, x, y) => {
+  showMenu([
+    { label: `Select stack (${stack.length})`,
+      action: () => layer.setSelection(stack.map(c => c.id)) },
+    { label: 'Deselect all',
+      action: () => layer.clearSelection() },
+    { label: `Move ${counter.id}…`,
+      action: () => openMoveDialog(counter) },
+    { label: `Delete ${counter.id}`,
+      action: () => layer.removeCounter(counter.id) },
+  ], x, y);
+};
+```
+
+**Minimal DOM implementation** (used in the demos):
+
+```html
+<!-- Add to <style> -->
+<style>
+#ctx-menu {
+  display: none; position: fixed; z-index: 1000;
+  background: rgba(10,20,30,0.96); border: 1px solid #4a6a88;
+  border-radius: 4px; padding: 4px 0; min-width: 180px;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.55);
+}
+.ctx-item { padding: 5px 14px; cursor: pointer; font-size: 13px; }
+.ctx-item:hover { background: #1a3a58; }
+.ctx-sep  { height: 1px; background: #2d4050; margin: 4px 0; }
+</style>
+
+<!-- Add to <body> -->
+<div id="ctx-menu"></div>
+```
+
+```js
+const ctxMenu = document.getElementById('ctx-menu');
+let ctxCounter = null, ctxStack = null;
+
+layer.onContextMenu = (counter, stack, x, y) => {
+  ctxCounter = counter;
+  ctxStack   = stack;
+
+  ctxMenu.innerHTML =
+    `<div class="ctx-item" data-action="select">Select stack (${stack.length})</div>` +
+    `<div class="ctx-sep"></div>` +
+    `<div class="ctx-item" data-action="delete">Delete ${counter.id}</div>`;
+
+  // Keep menu inside the viewport
+  ctxMenu.style.left    = Math.min(x, innerWidth  - 190) + 'px';
+  ctxMenu.style.top     = Math.min(y, innerHeight - 100) + 'px';
+  ctxMenu.style.display = 'block';
+};
+
+ctxMenu.addEventListener('click', e => {
+  const item = e.target.closest('[data-action]');
+  if (!item) return;
+  ctxMenu.style.display = 'none';
+  if (item.dataset.action === 'select')
+    layer.setSelection(ctxStack.map(c => c.id));
+  else if (item.dataset.action === 'delete')
+    layer.removeCounter(ctxCounter.id);
+});
+
+// Dismiss on outside click or Escape
+document.addEventListener('click',   e => { if (!ctxMenu.contains(e.target)) ctxMenu.style.display = 'none'; }, true);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') ctxMenu.style.display = 'none'; });
+```
 
 ---
 
@@ -318,4 +478,4 @@ HexViewer.OFFSET_EVEN   // even-row/col offset (+1)
 
 The visible-hex computation uses the viewport AABB to estimate the row/col range before iterating, so only hexes near the visible area are checked. This keeps frame cost proportional to visible hexes rather than total grid size, making large grids (e.g. 1000x1000) interactive.
 
-`demo-perf.html` provides a 1000x1000 grid with 8000 randomly placed counters and an FPS counter for benchmarking.
+`demo-perf.html` provides a 1000x1000 grid with 24,000 randomly placed counters (plus several explicit large stacks for warp testing), a minimap, overlay panels, context menu, and an FPS counter for benchmarking.

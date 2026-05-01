@@ -110,9 +110,33 @@ input[type=range] {
   touch-action: none;
 }
 #map-canvas:active { cursor: grabbing; }
+
+#ctx-menu {
+  display: none;
+  position: fixed;
+  z-index: 1000;
+  background: rgba(10,20,30,0.96);
+  border: 1px solid #4a6a88;
+  border-radius: 4px;
+  padding: 4px 0;
+  min-width: 180px;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.55);
+  user-select: none;
+}
+.ctx-item {
+  padding: 5px 14px;
+  cursor: pointer;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.ctx-item:hover { background: #1a3a58; }
+.ctx-item.danger { color: #e07070; }
+.ctx-item.danger:hover { background: #3a1818; }
+.ctx-sep { height: 1px; background: #2d4050; margin: 4px 0; }
 </style>
 </head>
 <body>
+<div id="ctx-menu"></div>
 <div id="app">
   <div id="toolbar">
     <span class="title">HexViewer</span>
@@ -205,7 +229,7 @@ input[type=range] {
 <script>
 (function () {
   const { HexMap, Layer, Geometry, FLAT_TOP, POINTY_TOP, OFFSET_ODD, OFFSET_EVEN,
-          Counter, CounterLayer } = window.HexViewer;
+          Counter, CounterLayer, PanelLayer } = window.HexViewer;
 
   // -- Sample custom layer: random pastel fills --------------------------------
   class ColorLayer extends Layer {
@@ -234,19 +258,143 @@ input[type=range] {
   const colorLayer   = new ColorLayer(ROWS, COLS);
   const counterLayer = new CounterLayer();
 
-  // Sample counters: a couple of stacks and some lone counters
+  // Overlay panel — shows hex info, stays fixed over the map
+  const infoPanel = new PanelLayer('info-panel', {
+    position: { top: 10, right: 10 },
+    html: '<span style="color:#6ab0d8;font-weight:bold">Hex info</span><br>hover a hex',
+  });
+  infoPanel.setSize({ width: 160 });
+
+  // Overlay panel — shows selected counter info; hidden until a counter is clicked
+  const selPanel = new PanelLayer('sel-panel', {
+    position: { bottom: 10, left: 10 },
+    visible: false,
+  });
+  selPanel.setSize({ width: 200 });
+
+  // Sample counters — single units, pairs, and larger stacks for warp testing
   [
+    // 3-counter stack
     new Counter({ id: 'a1', row: 3,  col: 5,  size: 'large', color: '#cc4444' }),
     new Counter({ id: 'a2', row: 3,  col: 5,  size: 'large', color: '#4477cc' }),
     new Counter({ id: 'a3', row: 3,  col: 5,  size: 'small', color: '#44aa44' }),
+    // 2-counter stack
     new Counter({ id: 'b1', row: 8,  col: 12, size: 'large', color: '#cc8833' }),
     new Counter({ id: 'b2', row: 8,  col: 12, size: 'small', color: '#9944cc' }),
+    // lone counter
     new Counter({ id: 'c1', row: 5,  col: 20, size: 'large', color: '#229988' }),
+    // 2-counter stack
     new Counter({ id: 'd1', row: 15, col: 7,  size: 'small', color: '#cc4488' }),
     new Counter({ id: 'd2', row: 15, col: 7,  size: 'large', color: '#888833' }),
+    // 5-counter stack for warp testing
+    new Counter({ id: 'e1', row: 10, col: 15, size: 'large', color: '#3366bb' }),
+    new Counter({ id: 'e2', row: 10, col: 15, size: 'large', color: '#bb6633' }),
+    new Counter({ id: 'e3', row: 10, col: 15, size: 'large', color: '#44bbbb' }),
+    new Counter({ id: 'e4', row: 10, col: 15, size: 'small', color: '#bb4466' }),
+    new Counter({ id: 'e5', row: 10, col: 15, size: 'small', color: '#88bb33' }),
+    // 4-counter stack
+    new Counter({ id: 'f1', row: 6,  col: 25, size: 'large', color: '#aa44aa' }),
+    new Counter({ id: 'f2', row: 6,  col: 25, size: 'large', color: '#44aacc' }),
+    new Counter({ id: 'f3', row: 6,  col: 25, size: 'small', color: '#ccaa44' }),
+    new Counter({ id: 'f4', row: 6,  col: 25, size: 'small', color: '#cc6644' }),
   ].forEach(c => counterLayer.addCounter(c));
 
   let map = null;
+
+  // Build and show the selection panel; any counter click re-shows it.
+  // Dismiss button hides it until the next selection event.
+  function updateSelPanel(ids) {
+    if (ids.size === 0) { selPanel.visible = false; return; }
+
+    // Group selected counters by hex
+    const byHex = new Map();
+    for (const id of ids) {
+      const c = counterLayer.getCounter(id);
+      if (!c) continue;
+      const key = `${c.row},${c.col}`;
+      if (!byHex.has(key)) byHex.set(key, { row: c.row, col: c.col, counters: [] });
+      byHex.get(key).counters.push(c);
+    }
+
+    let rows = '';
+    for (const { row, col, counters } of byHex.values()) {
+      rows += `<div style="color:#88aabb;font-size:11px;margin:6px 0 3px">` +
+              `hex ${map.getHexLabel(row, col)}</div>`;
+      for (const c of counters) {
+        rows +=
+          `<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">` +
+          `<span style="width:12px;height:12px;background:${c.color};display:inline-block;` +
+          `border:1px solid rgba(255,255,255,0.25);flex-shrink:0"></span>` +
+          `<span style="flex:1;overflow:hidden;text-overflow:ellipsis">${c.id}</span>` +
+          `<span style="color:#88aabb;font-size:11px">${c.size}</span>` +
+          `</div>`;
+      }
+    }
+
+    selPanel.html =
+      `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">` +
+      `<span style="color:#6ab0d8;font-weight:bold">Selected (${ids.size})</span>` +
+      `<button id="sel-close" style="padding:1px 7px;font-size:12px;line-height:1.4">&#x2715;</button>` +
+      `</div>` + rows;
+
+    selPanel.panelElement.querySelector('#sel-close')
+      .addEventListener('click', () => { selPanel.visible = false; });
+
+    selPanel.visible = true;
+  }
+
+  counterLayer.onSelectionChange = updateSelPanel;
+
+  // -- Context menu -----------------------------------------------------------
+
+  const ctxMenu = document.getElementById('ctx-menu');
+  let ctxCounter = null, ctxStack = null;
+
+  counterLayer.onContextMenu = (counter, stack, x, y) => {
+    ctxCounter = counter;
+    ctxStack   = stack;
+
+    ctxMenu.innerHTML =
+      `<div class="ctx-item" data-action="select-stack">Select all in stack (${stack.length})</div>` +
+      `<div class="ctx-item" data-action="deselect">Deselect all</div>` +
+      `<div class="ctx-sep"></div>` +
+      `<div class="ctx-item danger" data-action="delete-counter">Delete ${counter.id}</div>` +
+      `<div class="ctx-item danger" data-action="delete-stack">Delete stack</div>`;
+
+    // Keep menu inside the viewport
+    const mw = 190, mh = 130;
+    ctxMenu.style.left    = Math.min(x, window.innerWidth  - mw) + 'px';
+    ctxMenu.style.top     = Math.min(y, window.innerHeight - mh) + 'px';
+    ctxMenu.style.display = 'block';
+  };
+
+  ctxMenu.addEventListener('click', e => {
+    const item = e.target.closest('[data-action]');
+    if (!item) return;
+    ctxMenu.style.display = 'none';
+    switch (item.dataset.action) {
+      case 'select-stack':
+        counterLayer.setSelection(ctxStack.map(c => c.id));
+        break;
+      case 'deselect':
+        counterLayer.clearSelection();
+        break;
+      case 'delete-counter':
+        counterLayer.removeCounter(ctxCounter.id);
+        break;
+      case 'delete-stack':
+        ctxStack.forEach(c => counterLayer.removeCounter(c.id));
+        break;
+    }
+  });
+
+  // Dismiss context menu on any click outside it
+  document.addEventListener('click', e => {
+    if (!ctxMenu.contains(e.target)) ctxMenu.style.display = 'none';
+  }, true);
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') ctxMenu.style.display = 'none';
+  });
 
   function applyColors() {
     map.background = document.getElementById('col-bg').value;
@@ -271,9 +419,11 @@ input[type=range] {
       orientation, originCorner, offsetParity, rotationStep,
     });
 
-    // Insert colour layer below the built-ins, counter layer on top
+    // Insert colour layer below the built-ins, then counter layer and panels on top
     map.addLayer(colorLayer, 0);
     map.addLayer(counterLayer);
+    map.addLayer(infoPanel);
+    map.addLayer(selPanel);
 
     // Restore checkbox visibility
     map.setLayerVisible('hex-outline', document.getElementById('chk-outline').checked);
@@ -290,6 +440,9 @@ input[type=range] {
     map.on('hexHover', ({ row, col }) => {
       document.getElementById('status').textContent =
         `row ${String(row).padStart(2,'0')}  col ${String(col).padStart(2,'0')}  →  ${map.getHexLabel(row, col)}`;
+      infoPanel.html =
+        `<span style="color:#6ab0d8;font-weight:bold">${map.getHexLabel(row, col)}</span><br>` +
+        `row&nbsp;${String(row).padStart(2,'0')}&nbsp;&nbsp;col&nbsp;${String(col).padStart(2,'0')}`;
     });
 
     map.on('hexClick', ({ row, col }) => {

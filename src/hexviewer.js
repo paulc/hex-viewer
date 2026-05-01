@@ -203,6 +203,101 @@ class CenterDotLayer extends Layer {
     }
 }
 
+// -- DomLayer / PanelLayer -----------------------------------------------------
+
+// Base class for layers that live in the DOM overlay rather than the canvas.
+// The overlay root is a pointer-events:none div that covers the canvas exactly.
+// Subclasses can set pointer-events:auto on individual child elements to make
+// them interactive while leaving the rest of the canvas unblocked.
+class DomLayer extends Layer {
+    constructor(name, visible = true) {
+        super(name, visible);
+        this._el = document.createElement('div');
+        this._el.style.cssText = 'position:absolute;inset:0;pointer-events:none;';
+        if (!visible) this._el.style.display = 'none';
+    }
+
+    // Override visible so toggling updates the DOM element (no canvas redraw needed).
+    get visible() { return this._visible; }
+    set visible(v) {
+        this._visible = !!v;
+        this._el.style.display = v ? '' : 'none';
+    }
+
+    // Direct access to the full-size overlay container element.
+    get element() { return this._el; }
+
+    onAttach(hexMap) {
+        hexMap._overlayRoot.appendChild(this._el);
+        // Re-order all DOM-layer elements to match the _layers stack order.
+        for (const layer of hexMap._layers) {
+            if (layer._el && layer._el.parentNode === hexMap._overlayRoot) {
+                hexMap._overlayRoot.appendChild(layer._el);
+            }
+        }
+    }
+
+    onDetach(_hexMap) {
+        this._el.remove();
+    }
+
+    // DOM layers do not participate in the canvas render loop.
+    render(_ctx, _hexMap, _visibleHexes) {}
+}
+
+// A pre-styled, absolutely positioned panel for displaying game information.
+class PanelLayer extends DomLayer {
+    constructor(name, options = {}) {
+        super(name, options.visible !== false);
+
+        const panel = document.createElement('div');
+        panel.style.cssText = [
+            'position:absolute',
+            'box-sizing:border-box',
+            'pointer-events:auto',
+            'background:rgba(10,20,30,0.82)',
+            'border:1px solid #4a6a88',
+            'border-radius:4px',
+            'padding:8px 12px',
+            'color:#c8d8e8',
+            'font-family:monospace',
+            'font-size:13px',
+            'min-width:80px',
+        ].join(';');
+        this._panel = panel;
+        this._el.appendChild(panel);
+
+        if (options.position) this.setPosition(options.position);
+        if (options.html !== undefined) this.html = options.html;
+    }
+
+    // Set panel position within the canvas area.
+    // Each value is a CSS length string or a number (treated as px); omit sides to leave unset.
+    setPosition({ top, right, bottom, left } = {}) {
+        const px = v => v === undefined ? '' : (typeof v === 'number' ? v + 'px' : v);
+        const s = this._panel.style;
+        s.top    = px(top);
+        s.right  = px(right);
+        s.bottom = px(bottom);
+        s.left   = px(left);
+        return this;
+    }
+
+    // Set panel dimensions. Values are CSS strings or numbers (px).
+    setSize({ width, height } = {}) {
+        const px = v => typeof v === 'number' ? v + 'px' : v;
+        if (width  !== undefined) this._panel.style.width  = px(width);
+        if (height !== undefined) this._panel.style.height = px(height);
+        return this;
+    }
+
+    // Set or replace the panel's HTML content.
+    set html(content) { this._panel.innerHTML = content; }
+
+    // Direct access to the panel element for arbitrary DOM manipulation.
+    get panelElement() { return this._panel; }
+}
+
 // -- MinimapLayer --------------------------------------------------------------
 
 class MinimapLayer extends Layer {
@@ -393,6 +488,20 @@ class HexMap {
         this._dpr       = window.devicePixelRatio || 1;
         this._destroyed = false;
 
+        // Wrap the canvas in a relative-positioned div so absolutely-positioned
+        // DOM overlay layers can be placed over it without affecting page layout.
+        const wrapper = document.createElement('div');
+        wrapper.style.cssText = 'position:relative;width:100%;height:100%;display:block;overflow:hidden;';
+        canvas.parentNode.insertBefore(wrapper, canvas);
+        wrapper.appendChild(canvas);
+
+        const overlayRoot = document.createElement('div');
+        overlayRoot.style.cssText = 'position:absolute;inset:0;pointer-events:none;overflow:hidden;';
+        wrapper.appendChild(overlayRoot);
+
+        this._wrapper     = wrapper;
+        this._overlayRoot = overlayRoot;
+
         const {
             rows         = 10,
             cols         = 10,
@@ -483,7 +592,7 @@ class HexMap {
 
     setLayerVisible(name, visible) {
         const layer = this.getLayer(name);
-        if (layer) { layer._visible = !!visible; this._scheduleRender(); }
+        if (layer) { layer.visible = !!visible; this._scheduleRender(); }
         return this;
     }
 
@@ -615,6 +724,9 @@ class HexMap {
         this._layers = [];
         this._resizeObserver.disconnect();
         this._eventController.abort();
+        // Unwrap: move canvas back to where the wrapper was, then remove the wrapper
+        this._wrapper.parentNode.insertBefore(this._canvas, this._wrapper);
+        this._wrapper.remove();
     }
 
     // -- Private ---------------------------------------------------------------
@@ -821,6 +933,8 @@ window.HexViewer = {
     HexOutlineLayer,
     HexLabelLayer,
     CenterDotLayer,
+    DomLayer,
+    PanelLayer,
     MinimapLayer,
     FLAT_TOP,
     POINTY_TOP,

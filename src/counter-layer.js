@@ -27,8 +27,17 @@
             this.largeScale = 1.15;
             this.smallScale = 0.85;
 
-            this._boundClick  = this._onClick.bind(this);
-            this._boundDblClick = this._onDblClick.bind(this);
+            // Optional callback fired whenever the selection changes.
+            // Receives a snapshot Set of the currently selected ids.
+            this.onSelectionChange = null;
+
+            // Optional callback fired on right-click over a counter.
+            // Receives (counter, stack[], clientX, clientY).
+            this.onContextMenu = null;
+
+            this._boundClick       = this._onClick.bind(this);
+            this._boundDblClick    = this._onDblClick.bind(this);
+            this._boundContextMenu = this._onContextMenu.bind(this);
         }
 
         // -- Public API -----------------------------------------------------
@@ -41,20 +50,32 @@
 
         removeCounter(id) {
             this._counters.delete(id);
-            this._selected.delete(id);
+            const wasSelected = this._selected.delete(id);
             if (this._warpedHex) {
                 const remaining = this._countersAt(this._warpedHex.row, this._warpedHex.col);
                 if (remaining.length === 0) this._warpedHex = null;
             }
             this._hexMap && this._hexMap.refresh();
+            if (wasSelected) this._notifySelectionChange();
             return this;
         }
 
         getSelected() { return new Set(this._selected); }
 
+        getCounter(id) { return this._counters.get(id) || null; }
+
+        // Replace the current selection with the given ids.
+        setSelection(ids) {
+            this._selected = new Set(ids);
+            this._hexMap && this._hexMap.refresh();
+            this._notifySelectionChange();
+            return this;
+        }
+
         clearSelection() {
             this._selected.clear();
             this._hexMap && this._hexMap.refresh();
+            this._notifySelectionChange();
             return this;
         }
 
@@ -67,13 +88,15 @@
         // -- Layer lifecycle ------------------------------------------------
 
         onAttach(hexMap) {
-            hexMap._canvas.addEventListener('click',    this._boundClick,    { capture: true });
-            hexMap._canvas.addEventListener('dblclick', this._boundDblClick, { capture: true });
+            hexMap._canvas.addEventListener('click',       this._boundClick,       { capture: true });
+            hexMap._canvas.addEventListener('dblclick',    this._boundDblClick,    { capture: true });
+            hexMap._canvas.addEventListener('contextmenu', this._boundContextMenu, { capture: true });
         }
 
         onDetach(hexMap) {
-            hexMap._canvas.removeEventListener('click',    this._boundClick,    { capture: true });
-            hexMap._canvas.removeEventListener('dblclick', this._boundDblClick, { capture: true });
+            hexMap._canvas.removeEventListener('click',       this._boundClick,       { capture: true });
+            hexMap._canvas.removeEventListener('dblclick',    this._boundDblClick,    { capture: true });
+            hexMap._canvas.removeEventListener('contextmenu', this._boundContextMenu, { capture: true });
         }
 
         // -- Render ---------------------------------------------------------
@@ -82,6 +105,8 @@
             const size = hexMap._layout.size;
 
             if (this._warpedHex) {
+                // Render all non-warped stacks dimmed, then the warp view on top.
+                this._renderStacksDimmed(ctx, hexMap, visibleHexes, size);
                 this._renderWarped(ctx, hexMap, size);
             } else {
                 this._renderStacks(ctx, hexMap, visibleHexes, size);
@@ -131,6 +156,29 @@
             }
         }
 
+        // Render all stacks except the currently warped hex at reduced opacity.
+        _renderStacksDimmed(ctx, hexMap, visibleHexes, size) {
+            const hexSet = new Map();
+            for (const h of visibleHexes) hexSet.set(`${h.row},${h.col}`, h);
+
+            const byHex = new Map();
+            for (const c of this._counters.values()) {
+                const key = `${c.row},${c.col}`;
+                if (!byHex.has(key)) byHex.set(key, []);
+                byHex.get(key).push(c);
+            }
+
+            const skipKey = `${this._warpedHex.row},${this._warpedHex.col}`;
+            ctx.globalAlpha = 0.35;
+            for (const [key, stack] of byHex) {
+                if (key === skipKey) continue;
+                const hex = hexSet.get(key);
+                if (!hex) continue;
+                this._renderStack(ctx, stack, hex.cx, hex.cy, size);
+            }
+            ctx.globalAlpha = 1;
+        }
+
         // -- Warp rendering -------------------------------------------------
 
         _renderWarped(ctx, hexMap, size) {
@@ -143,7 +191,7 @@
 
             // Leader lines from hex centre to each warped counter centre
             ctx.save();
-            ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+            ctx.strokeStyle = this._leaderLineColor(hexMap);
             ctx.lineWidth   = 1 / hexMap._viewport.zoom;
             ctx.setLineDash([size * 0.15, size * 0.1]);
             for (const pos of positions) {
@@ -248,7 +296,8 @@
         _onClick(e) {
             if (!this.visible || !this._hexMap) return;
             const { wx, wy } = this._hexMap.screenToWorld(e.clientX, e.clientY);
-            const size = this._hexMap._layout.size;
+            const size  = this._hexMap._layout.size;
+            const shift = e.shiftKey;
 
             if (this._warpedHex) {
                 const stack = this._countersAt(this._warpedHex.row, this._warpedHex.col);
@@ -258,9 +307,17 @@
 
                 for (const pos of positions) {
                     if (this._hitTestCounter(wx, wy, pos.x, pos.y, pos.counter, size)) {
-                        this._toggleSelect(pos.counter.id);
+                        if (shift) {
+                            // Shift: toggle this specific counter, keep others
+                            this._toggleSelect(pos.counter.id);
+                        } else {
+                            // No shift: select only this counter
+                            this._selected.clear();
+                            this._selected.add(pos.counter.id);
+                        }
                         e.stopImmediatePropagation();
                         this._hexMap.refresh();
+                        this._notifySelectionChange();
                         return;
                     }
                 }
@@ -272,12 +329,23 @@
                 return;
             }
 
-            // Check for click on a counter stack (top counter only)
+            // Click on a counter stack
             const hit = this._hitTestStacks(wx, wy, size);
             if (hit) {
-                this._toggleSelect(hit.topCounter.id);
+                const stackIds = hit.stack.map(c => c.id);
+                if (shift) {
+                    // Shift: toggle the whole stack (add if not all selected, remove if all selected)
+                    const allSelected = stackIds.every(id => this._selected.has(id));
+                    if (allSelected) stackIds.forEach(id => this._selected.delete(id));
+                    else             stackIds.forEach(id => this._selected.add(id));
+                } else {
+                    // No shift: select only this stack, deselect everything else
+                    this._selected.clear();
+                    stackIds.forEach(id => this._selected.add(id));
+                }
                 e.stopImmediatePropagation();
                 this._hexMap.refresh();
+                this._notifySelectionChange();
             }
         }
 
@@ -292,6 +360,38 @@
                 this._warpedHex = { row: hit.row, col: hit.col };
                 e.stopImmediatePropagation();
                 this._hexMap.refresh();
+            }
+        }
+
+        _onContextMenu(e) {
+            if (!this.visible || !this._hexMap || !this.onContextMenu) return;
+            const { wx, wy } = this._hexMap.screenToWorld(e.clientX, e.clientY);
+            const size = this._hexMap._layout.size;
+
+            let hitCounter = null;
+            let hitStack   = null;
+
+            if (this._warpedHex) {
+                const stack = this._countersAt(this._warpedHex.row, this._warpedHex.col);
+                const { x: hx, y: hy } = Geometry.offsetToPixel(
+                    this._warpedHex.row, this._warpedHex.col, this._hexMap._layout);
+                const positions = this._getWarpPositions(stack, hx, hy, size);
+                for (const pos of positions) {
+                    if (this._hitTestCounter(wx, wy, pos.x, pos.y, pos.counter, size)) {
+                        hitCounter = pos.counter;
+                        hitStack   = stack;
+                        break;
+                    }
+                }
+            } else {
+                const hit = this._hitTestStacks(wx, wy, size);
+                if (hit) { hitCounter = hit.topCounter; hitStack = hit.stack; }
+            }
+
+            if (hitCounter) {
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                this.onContextMenu(hitCounter, hitStack, e.clientX, e.clientY);
             }
         }
 
@@ -339,6 +439,22 @@
         _toggleSelect(id) {
             if (this._selected.has(id)) this._selected.delete(id);
             else this._selected.add(id);
+        }
+
+        _notifySelectionChange() {
+            if (this.onSelectionChange) this.onSelectionChange(new Set(this._selected));
+        }
+
+        // Returns a dashed-line colour that contrasts against the map background.
+        _leaderLineColor(hexMap) {
+            const bg = hexMap.background;
+            if (!bg) return 'rgba(128,128,128,0.55)';
+            const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(bg);
+            if (!m) return 'rgba(128,128,128,0.55)';
+            const lum = (0.299 * parseInt(m[1], 16) +
+                         0.587 * parseInt(m[2], 16) +
+                         0.114 * parseInt(m[3], 16)) / 255;
+            return lum > 0.5 ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.45)';
         }
     }
 

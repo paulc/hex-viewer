@@ -91,9 +91,33 @@ button:hover { background: #1a2d40; border-color: #4a6a88; }
   touch-action: none;
 }
 #map-canvas:active { cursor: grabbing; }
+
+#ctx-menu {
+  display: none;
+  position: fixed;
+  z-index: 1000;
+  background: rgba(10,20,30,0.96);
+  border: 1px solid #4a6a88;
+  border-radius: 4px;
+  padding: 4px 0;
+  min-width: 180px;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.55);
+  user-select: none;
+}
+.ctx-item {
+  padding: 5px 14px;
+  cursor: pointer;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.ctx-item:hover { background: #1a3a58; }
+.ctx-item.danger { color: #e07070; }
+.ctx-item.danger:hover { background: #3a1818; }
+.ctx-sep { height: 1px; background: #2d4050; margin: 4px 0; }
 </style>
 </head>
 <body>
+<div id="ctx-menu"></div>
 <div id="app">
   <div id="toolbar">
     <span class="title">HexViewer &mdash; Perf Demo 1000&times;1000</span>
@@ -118,9 +142,9 @@ button:hover { background: #1a2d40; border-color: #4a6a88; }
     <div class="sep"></div>
 
     <div class="group">
-      <button id="btn-ccw">CCW</button>
+      <button id="btn-ccw">&#x21BA; CCW</button>
       <span id="rot-val">0&#xB0;</span>
-      <button id="btn-cw">CW</button>
+      <button id="btn-cw">&#x21BB; CW</button>
     </div>
 
     <div class="sep"></div>
@@ -143,9 +167,9 @@ button:hover { background: #1a2d40; border-color: #4a6a88; }
 <script>
 (function () {
   const { HexMap, Layer, Geometry, POINTY_TOP, OFFSET_ODD,
-          Counter, CounterLayer, MinimapLayer } = window.HexViewer;
+          Counter, CounterLayer, MinimapLayer, PanelLayer } = window.HexViewer;
 
-  const ROWS = 1000, COLS = 1000, N_COUNTERS = 8000;
+  const ROWS = 1000, COLS = 1000, N_COUNTERS = 24000;
 
   // -- Deterministic RNG (mulberry32) -------------------------------------------
 
@@ -159,7 +183,6 @@ button:hover { background: #1a2d40; border-color: #4a6a88; }
   }
 
   // -- Procedural colour layer --------------------------------------------------
-  // Computes colours on the fly from (row, col) - no stored array needed.
 
   class ColorLayer extends Layer {
     constructor() { super('color', false); }
@@ -191,13 +214,137 @@ button:hover { background: #1a2d40; border-color: #4a6a88; }
   const counterLayer = new CounterLayer();
   const minimapLayer = new MinimapLayer({ width: 220, height: 220, corner: 'bottom-right' });
 
+  // Random counters spread across the grid
   for (let i = 0; i < N_COUNTERS; i++) {
     const row   = Math.floor(rng() * ROWS);
     const col   = Math.floor(rng() * COLS);
     const size  = rng() < 0.4 ? 'small' : 'large';
     const color = COLORS[Math.floor(rng() * COLORS.length)];
-    counterLayer.addCounter(new Counter({ id: 'c' + i, row, col, size, color }));
+    counterLayer.addCounter(new Counter({ id: 'r' + i, row, col, size, color }));
   }
+
+  // Explicit stacks at known positions for warp/selection testing.
+  // Clustered near (100,100) so they're easy to navigate to after Fit.
+  const STACKS = [
+    { row: 80,  col: 80,  sizes: ['large','large','large','small','small','small'] },
+    { row: 80,  col: 120, sizes: ['large','large','large','large','small'] },
+    { row: 120, col: 80,  sizes: ['large','large','large','small'] },
+    { row: 120, col: 120, sizes: ['large','large','small','small','small'] },
+    { row: 100, col: 100, sizes: ['large','large','large','large','large','small','small'] },
+    { row: 500, col: 500, sizes: ['large','large','large','small','small'] },
+    { row: 800, col: 700, sizes: ['large','large','large','small'] },
+  ];
+
+  for (const { row, col, sizes } of STACKS) {
+    sizes.forEach((size, i) => {
+      const color = COLORS[Math.floor(rng() * COLORS.length)];
+      counterLayer.addCounter(new Counter({ id: `stk_${row}_${col}_${i}`, row, col, size, color }));
+    });
+  }
+
+  // -- Overlay panels -----------------------------------------------------------
+
+  const infoPanel = new PanelLayer('info-panel', {
+    position: { top: 10, right: 10 },
+    html: '<span style="color:#6ab0d8;font-weight:bold">Hex info</span><br>hover a hex',
+  });
+  infoPanel.setSize({ width: 200 });
+
+  const selPanel = new PanelLayer('sel-panel', {
+    position: { bottom: 10, left: 10 },
+    visible: false,
+  });
+  selPanel.setSize({ width: 210 });
+
+  function updateSelPanel(ids) {
+    if (ids.size === 0) { selPanel.visible = false; return; }
+
+    const byHex = new Map();
+    for (const id of ids) {
+      const c = counterLayer.getCounter(id);
+      if (!c) continue;
+      const key = `${c.row},${c.col}`;
+      if (!byHex.has(key)) byHex.set(key, { row: c.row, col: c.col, counters: [] });
+      byHex.get(key).counters.push(c);
+    }
+
+    let rows = '';
+    for (const { row, col, counters } of byHex.values()) {
+      rows += `<div style="color:#88aabb;font-size:11px;margin:6px 0 3px">` +
+              `hex ${map.getHexLabel(row, col)}</div>`;
+      for (const c of counters) {
+        rows +=
+          `<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">` +
+          `<span style="width:12px;height:12px;background:${c.color};display:inline-block;` +
+          `border:1px solid rgba(255,255,255,0.25);flex-shrink:0"></span>` +
+          `<span style="flex:1;overflow:hidden;text-overflow:ellipsis">${c.id}</span>` +
+          `<span style="color:#88aabb;font-size:11px">${c.size}</span>` +
+          `</div>`;
+      }
+    }
+
+    selPanel.html =
+      `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">` +
+      `<span style="color:#6ab0d8;font-weight:bold">Selected (${ids.size})</span>` +
+      `<button id="sel-close" style="padding:1px 7px;font-size:12px;line-height:1.4">&#x2715;</button>` +
+      `</div>` + rows;
+
+    selPanel.panelElement.querySelector('#sel-close')
+      .addEventListener('click', () => { selPanel.visible = false; });
+
+    selPanel.visible = true;
+  }
+
+  counterLayer.onSelectionChange = updateSelPanel;
+
+  // -- Context menu -------------------------------------------------------------
+
+  const ctxMenu = document.getElementById('ctx-menu');
+  let ctxCounter = null, ctxStack = null;
+
+  counterLayer.onContextMenu = (counter, stack, x, y) => {
+    ctxCounter = counter;
+    ctxStack   = stack;
+
+    ctxMenu.innerHTML =
+      `<div class="ctx-item" data-action="select-stack">Select all in stack (${stack.length})</div>` +
+      `<div class="ctx-item" data-action="deselect">Deselect all</div>` +
+      `<div class="ctx-sep"></div>` +
+      `<div class="ctx-item danger" data-action="delete-counter">Delete ${counter.id}</div>` +
+      `<div class="ctx-item danger" data-action="delete-stack">Delete stack</div>`;
+
+    const mw = 190, mh = 130;
+    ctxMenu.style.left    = Math.min(x, window.innerWidth  - mw) + 'px';
+    ctxMenu.style.top     = Math.min(y, window.innerHeight - mh) + 'px';
+    ctxMenu.style.display = 'block';
+  };
+
+  ctxMenu.addEventListener('click', e => {
+    const item = e.target.closest('[data-action]');
+    if (!item) return;
+    ctxMenu.style.display = 'none';
+    switch (item.dataset.action) {
+      case 'select-stack':
+        counterLayer.setSelection(ctxStack.map(c => c.id));
+        break;
+      case 'deselect':
+        counterLayer.clearSelection();
+        break;
+      case 'delete-counter':
+        counterLayer.removeCounter(ctxCounter.id);
+        break;
+      case 'delete-stack':
+        ctxStack.forEach(c => counterLayer.removeCounter(c.id));
+        break;
+    }
+  });
+
+  document.addEventListener('click', e => {
+    if (!ctxMenu.contains(e.target)) ctxMenu.style.display = 'none';
+  }, true);
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') ctxMenu.style.display = 'none';
+  });
 
   // -- Build map ----------------------------------------------------------------
 
@@ -212,9 +359,11 @@ button:hover { background: #1a2d40; border-color: #4a6a88; }
 
   map.getLayer('hex-label').visible  = false;
   map.getLayer('center-dot').visible = false;
-  map.addLayer(colorLayer,   0);  // below outlines
-  map.addLayer(counterLayer);     // above outlines
-  map.addLayer(minimapLayer);     // top of stack (screen-space)
+  map.addLayer(colorLayer,   0);
+  map.addLayer(counterLayer);
+  map.addLayer(minimapLayer);
+  map.addLayer(infoPanel);
+  map.addLayer(selPanel);
 
   // -- FPS display --------------------------------------------------------------
 
@@ -268,10 +417,14 @@ button:hover { background: #1a2d40; border-color: #4a6a88; }
   });
 
   map.on('hexHover', ({ row, col }) => {
+    const label = map.getHexLabel(row, col);
     document.getElementById('status').textContent =
       'row ' + String(row).padStart(4, '0') +
       '  col ' + String(col).padStart(4, '0') +
-      '  ->  ' + map.getHexLabel(row, col);
+      '  ->  ' + label;
+    infoPanel.html =
+      `<span style="color:#6ab0d8;font-weight:bold">${label}</span><br>` +
+      `row&nbsp;${String(row).padStart(4,'0')}&nbsp;&nbsp;col&nbsp;${String(col).padStart(4,'0')}`;
   });
 
   map.on('viewportChange', ({ angle }) => {
