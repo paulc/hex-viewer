@@ -21,11 +21,12 @@
     class CounterLayer extends Layer {
         constructor() {
             super('counters');
-            this._counters  = new Map();   // id -> Counter
-            this._warpedHex = null;        // { row, col } | null
-            this._selected  = new Set();   // selected counter ids
-            this.largeScale = 1.15;
-            this.smallScale = 0.85;
+            this._counters      = new Map();   // id -> Counter
+            this._hexOrientations = new Map(); // "row,col" -> angle in radians (0, π/3, 2π/3, …)
+            this._warpedHex     = null;        // { row, col } | null
+            this._selected      = new Set();   // selected counter ids
+            this.largeScale     = 1.15;
+            this.smallScale     = 0.85;
 
             // Optional callback fired whenever the selection changes.
             // Receives a snapshot Set of the currently selected ids.
@@ -85,6 +86,29 @@
             return this;
         }
 
+        // -- Hex facing orientation -----------------------------------------
+
+        // Returns the facing angle in radians for the given hex (default 0).
+        getHexOrientation(row, col) {
+            return this._hexOrientations.get(`${row},${col}`) || 0;
+        }
+
+        // Sets the facing angle for the given hex to the nearest 60° step.
+        setHexOrientation(row, col, angleRad) {
+            const step = Math.PI / 3;
+            const snapped = Math.round(angleRad / step) * step;
+            const norm    = ((snapped % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+            this._hexOrientations.set(`${row},${col}`, norm);
+            this._hexMap && this._hexMap.refresh();
+            return this;
+        }
+
+        // Rotate the hex's facing by steps × 60°.  Positive = clockwise.
+        rotateHex(row, col, steps = 1) {
+            const current = this.getHexOrientation(row, col);
+            return this.setHexOrientation(row, col, current + steps * Math.PI / 3);
+        }
+
         // -- Layer lifecycle ------------------------------------------------
 
         onAttach(hexMap) {
@@ -119,7 +143,6 @@
             const hexSet = new Map();
             for (const h of visibleHexes) hexSet.set(`${h.row},${h.col}`, h);
 
-            // Group counters by hex
             const byHex = new Map();
             for (const c of this._counters.values()) {
                 const key = `${c.row},${c.col}`;
@@ -130,12 +153,12 @@
             for (const [key, stack] of byHex) {
                 const hex = hexSet.get(key);
                 if (!hex) continue;
-                this._renderStack(ctx, stack, hex.cx, hex.cy, size);
+                const facing = this.getHexOrientation(hex.row, hex.col);
+                this._renderStack(ctx, stack, hex.cx, hex.cy, size, facing);
             }
         }
 
-        _renderStack(ctx, stack, cx, cy, size) {
-            // Large first (bottom), then small on top
+        _renderStack(ctx, stack, cx, cy, size, facing = 0) {
             const sorted = [...stack].sort((a, b) => {
                 if (a.size === b.size) return 0;
                 return a.size === 'large' ? -1 : 1;
@@ -143,17 +166,21 @@
 
             const offsetStep = size * 0.07;
             const n = sorted.length;
-            // Bottom counters are shifted down-right; top counter is at cx,cy
+            const angle = this._hexMap._viewport.angle;
+            // Stack offset goes in the screen-right-down direction so it always
+            // appears as a bottom-right shadow regardless of map rotation.
+            const cos_a = Math.cos(angle), sin_a = Math.sin(angle);
+            const rdx = (cos_a + sin_a) / Math.SQRT2;
+            const rdy = (-sin_a + cos_a) / Math.SQRT2;
+
             for (let i = 0; i < n; i++) {
                 const shift = (n - 1 - i) * offsetStep;
                 const c = sorted[i];
-                const selected = this._selected.has(c.id);
-                this._drawCounter(ctx, cx + shift, cy + shift, c, size, selected);
+                this._drawCounter(ctx, cx + shift * rdx, cy + shift * rdy, c, size,
+                                  this._selected.has(c.id), facing);
             }
 
-            if (n > 1) {
-                this._drawBadge(ctx, cx, cy, n, size);
-            }
+            if (n > 1) this._drawBadge(ctx, cx, cy, n, size);
         }
 
         // Render all stacks except the currently warped hex at reduced opacity.
@@ -174,7 +201,8 @@
                 if (key === skipKey) continue;
                 const hex = hexSet.get(key);
                 if (!hex) continue;
-                this._renderStack(ctx, stack, hex.cx, hex.cy, size);
+                const facing = this.getHexOrientation(stack[0].row, stack[0].col);
+                this._renderStack(ctx, stack, hex.cx, hex.cy, size, facing);
             }
             ctx.globalAlpha = 1;
         }
@@ -187,7 +215,9 @@
             if (stack.length === 0) { this._warpedHex = null; return; }
 
             const { x: hx, y: hy } = Geometry.offsetToPixel(row, col, hexMap._layout);
-            const positions = this._getWarpPositions(stack, hx, hy, size);
+            const angle    = hexMap._viewport.angle;
+            const facing   = this.getHexOrientation(row, col);
+            const positions = this._getWarpPositions(stack, hx, hy, size, angle);
 
             // Leader lines from hex centre to each warped counter centre
             ctx.save();
@@ -204,91 +234,129 @@
             ctx.restore();
 
             // Draw the original stack (dimmed) at the hex
-            const sorted = this._sortStack(stack);
+            const sorted     = this._sortStack(stack);
             const offsetStep = size * 0.07;
+            const cos_a      = Math.cos(angle), sin_a = Math.sin(angle);
+            const rdx        = (cos_a + sin_a) / Math.SQRT2;
+            const rdy        = (-sin_a + cos_a) / Math.SQRT2;
+
             ctx.globalAlpha = 0.35;
             for (let i = 0; i < sorted.length; i++) {
                 const shift = (sorted.length - 1 - i) * offsetStep;
-                this._drawCounter(ctx, hx + shift, hy + shift, sorted[i], size, false);
+                this._drawCounter(ctx, hx + shift * rdx, hy + shift * rdy, sorted[i], size, false, facing);
             }
             ctx.globalAlpha = 1;
 
             // Draw warped counters
-            for (let i = 0; i < stack.length; i++) {
-                const c = positions[i].counter;
-                const selected = this._selected.has(c.id);
-                this._drawCounter(ctx, positions[i].x, positions[i].y, c, size, selected);
+            for (const pos of positions) {
+                this._drawCounter(ctx, pos.x, pos.y, pos.counter, size,
+                                  this._selected.has(pos.counter.id), facing);
             }
         }
 
-        _getWarpPositions(stack, hx, hy, size) {
-            const sorted = this._sortStack(stack);
+        // Compute warp positions in world space such that the fan appears
+        // spread horizontally and shifted straight up on screen, regardless
+        // of the current map rotation angle.
+        _getWarpPositions(stack, hx, hy, size, angle) {
+            const sorted  = this._sortStack(stack);
             const spacing = size * 1.15;
+            const warpUp  = size * 1.8;
             const totalW  = (sorted.length - 1) * spacing;
-            const startX  = hx - totalW / 2;
-            const warpDy  = -(size * 1.8);
-            return sorted.map((c, i) => ({
-                counter: c,
-                x: startX + i * spacing,
-                y: hy + warpDy,
-            }));
+            const cos_a   = Math.cos(angle);
+            const sin_a   = Math.sin(angle);
+
+            return sorted.map((c, i) => {
+                const offset = i * spacing - totalW / 2;
+                return {
+                    counter: c,
+                    // offset along screen-right: world (+cos_a, -sin_a) per unit
+                    // warpUp along screen-up:    world (-sin_a, -cos_a) per unit
+                    x: hx + offset * cos_a - warpUp * sin_a,
+                    y: hy - offset * sin_a - warpUp * cos_a,
+                };
+            });
         }
 
         // -- Counter drawing ------------------------------------------------
 
-        _drawCounter(ctx, cx, cy, counter, hexSize, selected) {
-            const zoom = this._hexMap._viewport.zoom;
-            const s    = hexSize * (counter.size === 'large' ? this.largeScale : this.smallScale);
-            const half = s / 2;
-            const x    = cx - half;
-            const y    = cy - half;
-            const sPx  = s * zoom; // rendered width in CSS pixels
+        // Counters are rendered upright on screen (counter-rotated from the map)
+        // and rotated to their hex facing direction.
+        _drawCounter(ctx, cx, cy, counter, hexSize, selected, facing = 0) {
+            const zoom  = this._hexMap._viewport.zoom;
+            const angle = this._hexMap._viewport.angle;
+            const s     = hexSize * (counter.size === 'large' ? this.largeScale : this.smallScale);
+            const half  = s / 2;
+            const sPx   = s * zoom;
+
+            ctx.save();
+            ctx.translate(cx, cy);
+            // Counter-rotate to keep upright, then rotate to hex facing direction.
+            ctx.rotate(-angle + facing);
 
             if (sPx > 14) {
-                // Shadow
                 const shadowOffset = s * 0.05;
                 ctx.fillStyle = 'rgba(0,0,0,0.45)';
-                ctx.fillRect(x + shadowOffset, y + shadowOffset, s, s);
+                ctx.fillRect(-half + shadowOffset, -half + shadowOffset, s, s);
             }
 
-            // Main fill
             ctx.fillStyle = counter.color;
-            ctx.fillRect(x, y, s, s);
+            ctx.fillRect(-half, -half, s, s);
 
             if (sPx > 14) {
-                // Bevel highlight / shadow strips
                 const bevel = s * 0.06;
                 ctx.fillStyle = 'rgba(255,255,255,0.40)';
-                ctx.fillRect(x,              y,              s,     bevel);
-                ctx.fillRect(x,              y + bevel,      bevel, s - bevel);
+                ctx.fillRect(-half,              -half,              s,            bevel        );
+                ctx.fillRect(-half,              -half + bevel,      bevel,        s - bevel    );
                 ctx.fillStyle = 'rgba(0,0,0,0.30)';
-                ctx.fillRect(x,              y + s - bevel,  s,     bevel);
-                ctx.fillRect(x + s - bevel,  y,              bevel, s - bevel);
+                ctx.fillRect(-half,              -half + s - bevel,  s,            bevel        );
+                ctx.fillRect(-half + s - bevel,  -half,              bevel,        s - bevel    );
+
+                // Arrow pointing toward the hex facing direction ("up" in counter-local space)
+                const aw = s * 0.32;
+                const ah = s * 0.28;
+                const ay = -s * 0.06;
+                ctx.fillStyle   = 'rgba(255,255,255,0.82)';
+                ctx.strokeStyle = 'rgba(0,0,0,0.28)';
+                ctx.lineWidth   = s * 0.025;
+                ctx.beginPath();
+                ctx.moveTo(0,        ay - ah / 2);
+                ctx.lineTo(-aw / 2,  ay + ah / 2);
+                ctx.lineTo( aw / 2,  ay + ah / 2);
+                ctx.closePath();
+                ctx.fill();
+                ctx.stroke();
             }
 
-            // Selection border (always shown)
             if (selected) {
                 const bevel = s * 0.06;
                 ctx.strokeStyle = '#ffee00';
                 ctx.lineWidth   = Math.max(1.5, s * 0.05) / zoom;
-                ctx.strokeRect(x + bevel, y + bevel, s - bevel * 2, s - bevel * 2);
+                ctx.strokeRect(-half + bevel, -half + bevel, s - bevel * 2, s - bevel * 2);
             }
+
+            ctx.restore();
         }
 
         _drawBadge(ctx, cx, cy, count, hexSize) {
             if (hexSize * 0.22 * this._hexMap._viewport.zoom < 4) return;
-            const r    = hexSize * 0.22;
-            const bx   = cx + hexSize * 0.32;
-            const by   = cy - hexSize * 0.32;
+            const angle = this._hexMap._viewport.angle;
+            const r  = hexSize * 0.22;
+            const bx = hexSize * 0.32;
+            const by = -hexSize * 0.32;
+
+            ctx.save();
+            ctx.translate(cx, cy);
+            ctx.rotate(-angle);   // keep badge text upright
             ctx.fillStyle = 'rgba(20,20,20,0.82)';
             ctx.beginPath();
             ctx.arc(bx, by, r, 0, 2 * Math.PI);
             ctx.fill();
-            ctx.fillStyle = '#ffffff';
+            ctx.fillStyle    = '#ffffff';
             ctx.textAlign    = 'center';
             ctx.textBaseline = 'middle';
             ctx.font = `bold ${r * 1.2}px monospace`;
             ctx.fillText(String(count), bx, by);
+            ctx.restore();
         }
 
         // -- Event handlers -------------------------------------------------
@@ -303,15 +371,14 @@
                 const stack = this._countersAt(this._warpedHex.row, this._warpedHex.col);
                 const { x: hx, y: hy } = Geometry.offsetToPixel(
                     this._warpedHex.row, this._warpedHex.col, this._hexMap._layout);
-                const positions = this._getWarpPositions(stack, hx, hy, size);
+                const positions = this._getWarpPositions(
+                    stack, hx, hy, size, this._hexMap._viewport.angle);
 
                 for (const pos of positions) {
                     if (this._hitTestCounter(wx, wy, pos.x, pos.y, pos.counter, size)) {
                         if (shift) {
-                            // Shift: toggle this specific counter, keep others
                             this._toggleSelect(pos.counter.id);
                         } else {
-                            // No shift: select only this counter
                             this._selected.clear();
                             this._selected.add(pos.counter.id);
                         }
@@ -334,12 +401,10 @@
             if (hit) {
                 const stackIds = hit.stack.map(c => c.id);
                 if (shift) {
-                    // Shift: toggle the whole stack (add if not all selected, remove if all selected)
                     const allSelected = stackIds.every(id => this._selected.has(id));
                     if (allSelected) stackIds.forEach(id => this._selected.delete(id));
                     else             stackIds.forEach(id => this._selected.add(id));
                 } else {
-                    // No shift: select only this stack, deselect everything else
                     this._selected.clear();
                     stackIds.forEach(id => this._selected.add(id));
                 }
@@ -354,7 +419,6 @@
             const { wx, wy } = this._hexMap.screenToWorld(e.clientX, e.clientY);
             const size = this._hexMap._layout.size;
 
-            // Double-click on a stack: open warp
             const hit = this._hitTestStacks(wx, wy, size);
             if (hit && hit.stack.length > 1) {
                 this._warpedHex = { row: hit.row, col: hit.col };
@@ -375,7 +439,8 @@
                 const stack = this._countersAt(this._warpedHex.row, this._warpedHex.col);
                 const { x: hx, y: hy } = Geometry.offsetToPixel(
                     this._warpedHex.row, this._warpedHex.col, this._hexMap._layout);
-                const positions = this._getWarpPositions(stack, hx, hy, size);
+                const positions = this._getWarpPositions(
+                    stack, hx, hy, size, this._hexMap._viewport.angle);
                 for (const pos of positions) {
                     if (this._hitTestCounter(wx, wy, pos.x, pos.y, pos.counter, size)) {
                         hitCounter = pos.counter;
@@ -416,11 +481,13 @@
             return null;
         }
 
+        // Circular hit area (radius = half × √2) covers the counter regardless
+        // of its screen rotation.
         _hitTestCounter(wx, wy, cx, cy, counter, hexSize) {
             const s    = hexSize * (counter.size === 'large' ? this.largeScale : this.smallScale);
             const half = s / 2;
-            return wx >= cx - half && wx <= cx + half &&
-                   wy >= cy - half && wy <= cy + half;
+            const dx = wx - cx, dy = wy - cy;
+            return dx * dx + dy * dy <= half * half * 2;
         }
 
         // -- Helpers --------------------------------------------------------
@@ -445,7 +512,6 @@
             if (this.onSelectionChange) this.onSelectionChange(new Set(this._selected));
         }
 
-        // Returns a dashed-line colour that contrasts against the map background.
         _leaderLineColor(hexMap) {
             const bg = hexMap.background;
             if (!bg) return 'rgba(128,128,128,0.55)';

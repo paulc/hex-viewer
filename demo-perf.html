@@ -307,13 +307,16 @@ button:hover { background: #1a2d40; border-color: #4a6a88; }
     ctxStack   = stack;
 
     ctxMenu.innerHTML =
+      `<div class="ctx-item" data-action="rotate-ccw">&#x21BA; Rotate CCW 60°</div>` +
+      `<div class="ctx-item" data-action="rotate-cw">&#x21BB; Rotate CW 60°</div>` +
+      `<div class="ctx-sep"></div>` +
       `<div class="ctx-item" data-action="select-stack">Select all in stack (${stack.length})</div>` +
       `<div class="ctx-item" data-action="deselect">Deselect all</div>` +
       `<div class="ctx-sep"></div>` +
       `<div class="ctx-item danger" data-action="delete-counter">Delete ${counter.id}</div>` +
       `<div class="ctx-item danger" data-action="delete-stack">Delete stack</div>`;
 
-    const mw = 190, mh = 130;
+    const mw = 190, mh = 170;
     ctxMenu.style.left    = Math.min(x, window.innerWidth  - mw) + 'px';
     ctxMenu.style.top     = Math.min(y, window.innerHeight - mh) + 'px';
     ctxMenu.style.display = 'block';
@@ -324,6 +327,12 @@ button:hover { background: #1a2d40; border-color: #4a6a88; }
     if (!item) return;
     ctxMenu.style.display = 'none';
     switch (item.dataset.action) {
+      case 'rotate-ccw':
+        counterLayer.rotateHex(ctxCounter.row, ctxCounter.col, -1);
+        break;
+      case 'rotate-cw':
+        counterLayer.rotateHex(ctxCounter.row, ctxCounter.col, 1);
+        break;
       case 'select-stack':
         counterLayer.setSelection(ctxStack.map(c => c.id));
         break;
