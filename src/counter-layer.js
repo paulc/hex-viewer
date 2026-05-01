@@ -290,8 +290,9 @@
 
             ctx.save();
             ctx.translate(cx, cy);
-            // Counter-rotate to keep upright, then rotate to hex facing direction.
-            ctx.rotate(-angle + facing);
+            // Rotate to hex facing in world space; the viewport transform already
+            // applies the map angle, so counters rotate with the map naturally.
+            ctx.rotate(facing);
 
             if (sPx > 14) {
                 const shadowOffset = s * 0.05;
