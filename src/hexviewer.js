@@ -1,7 +1,7 @@
 (function () {
 'use strict';
 
-// ── Orientation constants (redblobgames) ──────────────────────────────────────
+// -- Orientation constants (redblobgames) --------------------------------------
 
 const FLAT_TOP = Object.freeze({
     f: [3 / 2, 0, Math.sqrt(3) / 2, Math.sqrt(3)],
@@ -25,11 +25,11 @@ const CUBE_DIRECTIONS = [
     { q: -1, r: 0, s: 1 }, { q: -1, r: 1, s: 0 }, { q: 0, r: 1, s: -1 },
 ];
 
-// ── Geometry namespace (pure functions) ───────────────────────────────────────
+// -- Geometry namespace (pure functions) ---------------------------------------
 
 const Geometry = {
 
-    // Offset → axial. Uses Math.trunc (not Math.floor) for negative-coord safety.
+    // Offset -> axial. Uses Math.trunc (not Math.floor) for negative-coord safety.
     offsetToAxial(row, col, orientation, parity) {
         if (orientation === POINTY_TOP) {
             return { q: col - Math.trunc((row + parity * (row & 1)) / 2), r: row };
@@ -114,7 +114,7 @@ const Geometry = {
     },
 };
 
-// ── Layer base class ──────────────────────────────────────────────────────────
+// -- Layer base class ----------------------------------------------------------
 
 class Layer {
     constructor(name, visible = true) {
@@ -131,11 +131,14 @@ class Layer {
         if (this._hexMap) this._hexMap._scheduleRender();
     }
 
+    onAttach(_hexMap) {}
+    onDetach(_hexMap) {}
+
     // Override in subclasses. ctx is already in world space (pan/rotate/zoom applied).
     render(_ctx, _hexMap, _visibleHexes) {}
 }
 
-// ── Built-in layers ───────────────────────────────────────────────────────────
+// -- Built-in layers -----------------------------------------------------------
 
 class HexOutlineLayer extends Layer {
     constructor(options = {}) {
@@ -168,10 +171,7 @@ class HexLabelLayer extends Layer {
 
     render(ctx, hexMap, visibleHexes) {
         const { size, orientation } = hexMap._layout;
-        // Flat-top: label just inside the top flat edge.
-        // Pointy-top: label near the bottom vertex.
-        // These world-y offsets work for both yFlip values because the visual
-        // top/bottom of a hex always lands at the same world-y relative to centre.
+        if (size * 0.28 * hexMap._viewport.zoom < 6) return; // too small to read
         const dy = orientation === FLAT_TOP
             ? -(size * (Math.sqrt(3) / 2 - 0.30))
             :   (size * 0.58);
@@ -192,7 +192,8 @@ class CenterDotLayer extends Layer {
     }
 
     render(ctx, hexMap, visibleHexes) {
-        const radius = hexMap._layout.size * 0.05;
+        const radius = hexMap._layout.size * 0.03;
+        if (radius * hexMap._viewport.zoom < 0.8) return; // sub-pixel, skip
         ctx.fillStyle = this.fillStyle;
         for (const hex of visibleHexes) {
             ctx.beginPath();
@@ -202,7 +203,188 @@ class CenterDotLayer extends Layer {
     }
 }
 
-// ── HexMap ────────────────────────────────────────────────────────────────────
+// -- MinimapLayer --------------------------------------------------------------
+
+class MinimapLayer extends Layer {
+    constructor(options = {}) {
+        super('minimap');
+        this._mmW    = options.width  || 200;
+        this._mmH    = options.height || 150;
+        this._margin = options.margin || 12;
+        this._corner = options.corner || 'bottom-right';
+        this._dragging  = false;
+        this._mapBounds = null;
+
+        this._onDown = this._onDown.bind(this);
+        this._onMove = this._onMove.bind(this);
+        this._onUp   = this._onUp.bind(this);
+    }
+
+    onAttach(hexMap) {
+        this._mapBounds = null; // recompute for new map geometry
+        const c = hexMap._canvas;
+        c.addEventListener('pointerdown', this._onDown, { capture: true });
+        c.addEventListener('pointermove', this._onMove, { capture: true });
+        c.addEventListener('pointerup',   this._onUp,   { capture: true });
+    }
+
+    onDetach(hexMap) {
+        const c = hexMap._canvas;
+        c.removeEventListener('pointerdown', this._onDown, { capture: true });
+        c.removeEventListener('pointermove', this._onMove, { capture: true });
+        c.removeEventListener('pointerup',   this._onUp,   { capture: true });
+    }
+
+    render(ctx, hexMap, _visibleHexes) {
+        const dpr = hexMap._dpr;
+        const cw  = hexMap._canvas.clientWidth;
+        const ch  = hexMap._canvas.clientHeight;
+        const { mx, my } = this._mmPos(cw, ch);
+        const mw = this._mmW, mh = this._mmH;
+
+        const bounds = this._bounds(hexMap);
+        const bw = bounds.maxX - bounds.minX;
+        const bh = bounds.maxY - bounds.minY;
+        // Uniform scale so the whole map fits inside the minimap with 4px padding
+        const pad  = 4;
+        const sc   = Math.min((mw - pad * 2) / bw, (mh - pad * 2) / bh);
+        const ox   = mx + (mw - bw * sc) / 2;
+        const oy   = my + (mh - bh * sc) / 2;
+        const toMX = wx => ox + (wx - bounds.minX) * sc;
+        const toMY = wy => oy + (wy - bounds.minY) * sc;
+
+        // Cache for hit-test and drag
+        this._mm = { mx, my, mw, mh, ox, oy, sc, bounds };
+
+        ctx.save();
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        // Panel background + border
+        ctx.fillStyle = 'rgba(8,18,28,0.88)';
+        ctx.fillRect(mx, my, mw, mh);
+
+        // Clip map contents to panel
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(mx, my, mw, mh);
+        ctx.clip();
+
+        // Map area
+        ctx.fillStyle = '#c8c0b0';
+        ctx.fillRect(toMX(bounds.minX), toMY(bounds.minY), bw * sc, bh * sc);
+
+        // Viewport rectangle (rotated quad in world space -> minimap)
+        const { panX, panY, zoom, angle } = hexMap._viewport;
+        const corners = [[0,0],[cw,0],[cw,ch],[0,ch]].map(([sx, sy]) => {
+            const dx = sx - panX, dy = sy - panY;
+            return {
+                wx: (dx * Math.cos(-angle) - dy * Math.sin(-angle)) / zoom,
+                wy: (dx * Math.sin(-angle) + dy * Math.cos(-angle)) / zoom,
+            };
+        });
+
+        ctx.fillStyle   = 'rgba(106,176,216,0.22)';
+        ctx.strokeStyle = '#6ab0d8';
+        ctx.lineWidth   = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(toMX(corners[0].wx), toMY(corners[0].wy));
+        for (let i = 1; i < 4; i++) ctx.lineTo(toMX(corners[i].wx), toMY(corners[i].wy));
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.restore(); // end clip
+
+        // Panel border drawn after clip restore so it's not clipped
+        ctx.strokeStyle = '#4a6a88';
+        ctx.lineWidth   = 1;
+        ctx.strokeRect(mx + 0.5, my + 0.5, mw - 1, mh - 1);
+
+        ctx.restore(); // end screen-space transform
+    }
+
+    // -- Private ---------------------------------------------------------------
+
+    _mmPos(cw, ch) {
+        const { _mmW: w, _mmH: h, _margin: m, _corner: corner } = this;
+        switch (corner) {
+            case 'top-left':     return { mx: m,        my: m };
+            case 'top-right':    return { mx: cw - w - m, my: m };
+            case 'bottom-left':  return { mx: m,        my: ch - h - m };
+            default:             return { mx: cw - w - m, my: ch - h - m };
+        }
+    }
+
+    _bounds(hexMap) {
+        if (this._mapBounds) return this._mapBounds;
+        const layout = hexMap._layout;
+        const rows = hexMap._rows, cols = hexMap._cols;
+        // Sample 8 strategic points: 4 corners + 4 edge midpoints
+        const samples = [
+            [0,0],[0,cols-1],[rows-1,0],[rows-1,cols-1],
+            [0,cols>>1],[rows-1,cols>>1],[rows>>1,0],[rows>>1,cols-1],
+        ];
+        let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+        for (const [r,c] of samples) {
+            const {x,y} = Geometry.offsetToPixel(r, c, layout);
+            if (x<minX)minX=x; if (x>maxX)maxX=x;
+            if (y<minY)minY=y; if (y>maxY)maxY=y;
+        }
+        const pad = layout.size * 1.5;
+        this._mapBounds = { minX:minX-pad, minY:minY-pad, maxX:maxX+pad, maxY:maxY+pad };
+        return this._mapBounds;
+    }
+
+    _screenPos(clientX, clientY) {
+        const rect = this._hexMap._canvas.getBoundingClientRect();
+        return { sx: clientX - rect.left, sy: clientY - rect.top };
+    }
+
+    _inMinimap(sx, sy) {
+        if (!this._mm) return false;
+        const { mx, my, mw, mh } = this._mm;
+        return sx >= mx && sx <= mx + mw && sy >= my && sy <= my + mh;
+    }
+
+    _panTo(sx, sy) {
+        const { ox, oy, sc, bounds } = this._mm;
+        const wx = bounds.minX + (sx - ox) / sc;
+        const wy = bounds.minY + (sy - oy) / sc;
+        const hm = this._hexMap;
+        const { zoom, angle } = hm._viewport;
+        const cw = hm._canvas.clientWidth  / 2;
+        const ch = hm._canvas.clientHeight / 2;
+        hm._viewport.panX = cw - zoom * (wx * Math.cos(angle) - wy * Math.sin(angle));
+        hm._viewport.panY = ch - zoom * (wx * Math.sin(angle) + wy * Math.cos(angle));
+        hm._scheduleRender();
+        hm._emit('viewportChange', hm.getViewport());
+    }
+
+    _onDown(e) {
+        if (!this.visible || !this._hexMap) return;
+        const { sx, sy } = this._screenPos(e.clientX, e.clientY);
+        if (!this._inMinimap(sx, sy)) return;
+        e.stopImmediatePropagation();
+        this._dragging = true;
+        this._hexMap._canvas.setPointerCapture(e.pointerId);
+        this._panTo(sx, sy);
+    }
+
+    _onMove(e) {
+        if (!this._dragging) return;
+        e.stopImmediatePropagation();
+        const { sx, sy } = this._screenPos(e.clientX, e.clientY);
+        this._panTo(sx, sy);
+    }
+
+    _onUp(e) {
+        if (!this._dragging) return;
+        this._dragging = false;
+        this._hexMap._canvas.releasePointerCapture(e.pointerId);
+    }
+}
+
+// -- HexMap --------------------------------------------------------------------
 
 class HexMap {
     constructor(canvas, options = {}) {
@@ -261,7 +443,7 @@ class HexMap {
         this.fitToView();
     }
 
-    // ── Public accessors ────────────────────────────────────────────────────
+    // -- Public accessors ----------------------------------------------------
 
     get layout()        { return this._layout; }
     get cornerOffsets() { return this._cornerOffsets; }
@@ -274,12 +456,13 @@ class HexMap {
 
     getHexLabel(row, col) { return this._getHexLabel(row, col); }
 
-    // ── Layer management ────────────────────────────────────────────────────
+    // -- Layer management ----------------------------------------------------
 
     addLayer(layer, index) {
         layer._hexMap = this;
         if (index === undefined) this._layers.push(layer);
         else this._layers.splice(index, 0, layer);
+        layer.onAttach(this);
         this._scheduleRender();
         return this;
     }
@@ -287,6 +470,7 @@ class HexMap {
     removeLayer(name) {
         const idx = this._layers.findIndex(l => l.name === name);
         if (idx !== -1) {
+            this._layers[idx].onDetach(this);
             this._layers[idx]._hexMap = null;
             this._layers.splice(idx, 1);
             this._scheduleRender();
@@ -303,7 +487,7 @@ class HexMap {
         return this;
     }
 
-    // ── Viewport ────────────────────────────────────────────────────────────
+    // -- Viewport ------------------------------------------------------------
 
     getViewport() {
         const { panX, panY, zoom, angle } = this._viewport;
@@ -343,7 +527,7 @@ class HexMap {
         if (!cw || !ch) return this;
 
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-        // Only check border hexes — interior can't extend beyond them
+        // Only check border hexes - interior can't extend beyond them
         for (let row = 0; row < this._rows; row++) {
             for (let col = 0; col < this._cols; col++) {
                 if (row > 0 && row < this._rows - 1 && col > 0 && col < this._cols - 1) continue;
@@ -367,7 +551,7 @@ class HexMap {
         return this;
     }
 
-    // ── Rotation (configurable step, default 60°) ────────────────────────────
+    // -- Rotation (configurable step, default 60deg) ----------------------------
 
     rotateBy(steps) {
         return this.setRotation(this.getRotation() + steps * this._rotationStep);
@@ -399,22 +583,41 @@ class HexMap {
         return Math.round((((this._viewport.angle * 180 / Math.PI) % 360) + 360) % 360);
     }
 
-    // ── Events ────────────────────────────────────────────────────────────────
+    // -- Events ----------------------------------------------------------------
 
     on(event, handler) {
         (this._handlers[event] || (this._handlers[event] = [])).push(handler);
         return this;
     }
 
+    off(event, handler) {
+        const hs = this._handlers[event];
+        if (hs) { const i = hs.indexOf(handler); if (i !== -1) hs.splice(i, 1); }
+        return this;
+    }
+
+    screenToWorld(clientX, clientY) {
+        const rect = this._canvas.getBoundingClientRect();
+        const { panX, panY, zoom, angle } = this._viewport;
+        const dx = (clientX - rect.left) - panX;
+        const dy = (clientY - rect.top)  - panY;
+        return {
+            wx: (dx * Math.cos(-angle) - dy * Math.sin(-angle)) / zoom,
+            wy: (dx * Math.sin(-angle) + dy * Math.cos(-angle)) / zoom,
+        };
+    }
+
     refresh() { this._scheduleRender(); return this; }
 
     destroy() {
         this._destroyed = true;
+        for (const layer of this._layers) { layer.onDetach(this); layer._hexMap = null; }
+        this._layers = [];
         this._resizeObserver.disconnect();
         this._eventController.abort();
     }
 
-    // ── Private ───────────────────────────────────────────────────────────────
+    // -- Private ---------------------------------------------------------------
 
     _emit(event, data) { (this._handlers[event] || []).forEach(h => h(data)); }
 
@@ -486,6 +689,13 @@ class HexMap {
                 this._emit('hexClick', { row, col, button: e.button });
             }
         }, { signal });
+
+        canvas.addEventListener('dblclick', e => {
+            const { row, col } = this._screenToOffset(e.clientX, e.clientY);
+            if (row >= 0 && row < this._rows && col >= 0 && col < this._cols) {
+                this._emit('hexDoubleClick', { row, col });
+            }
+        }, { signal });
     }
 
     // Zoom toward screen point (px, py) in CSS pixels
@@ -500,7 +710,7 @@ class HexMap {
         this._scheduleRender();
     }
 
-    // Convert screen position (clientX/Y) → offset hex coords
+    // Convert screen position (clientX/Y) -> offset hex coords
     _screenToOffset(clientX, clientY) {
         const rect = this._canvas.getBoundingClientRect();
         const { panX, panY, zoom, angle } = this._viewport;
@@ -566,10 +776,31 @@ class HexMap {
         const margin = this._layout.size * 1.5;
         minWx -= margin; minWy -= margin; maxWx += margin; maxWy += margin;
 
+        // Estimate which rows and cols could be visible so we don't scan the whole grid.
+        // Row/col step sizes are exact for the primary axis; the +2 pad covers stagger.
+        const { size, orientation, yFlip } = this._layout;
+        const isPointy = orientation === POINTY_TOP;
+        const rowStep = isPointy ? size * 1.5          : size * Math.sqrt(3);
+        const colStep = isPointy ? size * Math.sqrt(3) : size * 1.5;
+        const pad = 2;
+
+        let r0, r1;
+        if (yFlip >= 0) {
+            r0 = Math.floor(minWy / rowStep) - pad;
+            r1 = Math.ceil(maxWy / rowStep)  + pad;
+        } else {
+            r0 = Math.floor(-maxWy / rowStep) - pad;
+            r1 = Math.ceil(-minWy / rowStep)  + pad;
+        }
+        const rowMin = Math.max(0, r0);
+        const rowMax = Math.min(this._rows - 1, r1);
+        const colMin = Math.max(0, Math.floor(minWx / colStep) - pad);
+        const colMax = Math.min(this._cols - 1, Math.ceil(maxWx / colStep) + pad);
+
         const result = [];
         const layout = this._layout;
-        for (let row = 0; row < this._rows; row++) {
-            for (let col = 0; col < this._cols; col++) {
+        for (let row = rowMin; row <= rowMax; row++) {
+            for (let col = colMin; col <= colMax; col++) {
                 const { x, y } = Geometry.offsetToPixel(row, col, layout);
                 if (x >= minWx && x <= maxWx && y >= minWy && y <= maxWy) {
                     const { q, r } = Geometry.offsetToAxial(row, col, layout.orientation, layout.parity);
@@ -581,7 +812,7 @@ class HexMap {
     }
 }
 
-// ── Exports ───────────────────────────────────────────────────────────────────
+// -- Exports -------------------------------------------------------------------
 
 window.HexViewer = {
     HexMap,
@@ -590,6 +821,7 @@ window.HexViewer = {
     HexOutlineLayer,
     HexLabelLayer,
     CenterDotLayer,
+    MinimapLayer,
     FLAT_TOP,
     POINTY_TOP,
     OFFSET_ODD,
