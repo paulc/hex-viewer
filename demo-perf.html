@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HexViewer - Performance Demo</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  width: 100%; height: 100%;
+  overflow: hidden;
+  background: #111a24;
+  font-family: monospace;
+  color: #c8d8e8;
+}
+
+#app { display: flex; flex-direction: column; width: 100%; height: 100%; }
+
+#toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  background: #162030;
+  border-bottom: 1px solid #253545;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.title { color: #6ab0d8; font-weight: bold; letter-spacing: .05em; white-space: nowrap; }
+
+.sep { width: 1px; height: 18px; background: #2d4050; flex-shrink: 0; }
+
+.group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+label { display: flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; white-space: nowrap; }
+
+input[type=color] {
+  width: 22px; height: 22px;
+  border: 1px solid #2d4050;
+  border-radius: 3px;
+  padding: 0;
+  cursor: pointer;
+  background: none;
+  vertical-align: middle;
+}
+
+button {
+  background: #0e1c28;
+  color: #c8d8e8;
+  border: 1px solid #2d4050;
+  padding: 3px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: monospace;
+  font-size: 13px;
+  white-space: nowrap;
+}
+button:hover { background: #1a2d40; border-color: #4a6a88; }
+
+#rot-val {
+  min-width: 3.8em;
+  text-align: center;
+  color: #6ab0d8;
+  font-size: 13px;
+}
+
+#fps {
+  color: #44aa88;
+  font-size: 12px;
+  white-space: nowrap;
+  min-width: 7em;
+}
+
+#status {
+  margin-left: auto;
+  color: #4a6a88;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+#canvas-wrap { flex: 1; overflow: hidden; position: relative; }
+
+#map-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: grab;
+  touch-action: none;
+}
+#map-canvas:active { cursor: grabbing; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="toolbar">
+    <span class="title">HexViewer &mdash; Perf Demo 1000&times;1000</span>
+
+    <div class="sep"></div>
+
+    <div class="group">
+      <label><input type="checkbox" id="chk-outline" checked> Outlines</label>
+      <label><input type="checkbox" id="chk-label"> Numbers</label>
+      <label><input type="checkbox" id="chk-dot"> Dots</label>
+      <label><input type="checkbox" id="chk-color"> Colors</label>
+      <label><input type="checkbox" id="chk-counters" checked> Counters</label>
+      <label><input type="checkbox" id="chk-minimap" checked> Minimap</label>
+    </div>
+
+    <div class="sep"></div>
+
+    <div class="group">
+      <label title="Canvas background"><input type="color" id="col-bg" value="#f0ede0"> BG</label>
+    </div>
+
+    <div class="sep"></div>
+
+    <div class="group">
+      <button id="btn-ccw">CCW</button>
+      <span id="rot-val">0&#xB0;</span>
+      <button id="btn-cw">CW</button>
+    </div>
+
+    <div class="sep"></div>
+
+    <button id="btn-fit">Fit</button>
+
+    <div class="sep"></div>
+
+    <span id="fps">-- fps</span>
+    <span id="status">hover over a hex</span>
+  </div>
+
+  <div id="canvas-wrap">
+    <canvas id="map-canvas"></canvas>
+  </div>
+</div>
+
+<script src="src/hexviewer.js"></script>
+<script src="src/counter-layer.js"></script>
+<script>
+(function () {
+  const { HexMap, Layer, Geometry, POINTY_TOP, OFFSET_ODD,
+          Counter, CounterLayer, MinimapLayer } = window.HexViewer;
+
+  const ROWS = 1000, COLS = 1000, N_COUNTERS = 8000;
+
+  // -- Deterministic RNG (mulberry32) -------------------------------------------
+
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+      let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+
+  // -- Procedural colour layer --------------------------------------------------
+  // Computes colours on the fly from (row, col) - no stored array needed.
+
+  class ColorLayer extends Layer {
+    constructor() { super('color', false); }
+
+    render(ctx, hexMap, visibleHexes) {
+      const co = hexMap.cornerOffsets;
+      for (const hex of visibleHexes) {
+        ctx.fillStyle = `hsl(${(hex.row * 7 + hex.col * 13) % 360},38%,56%)`;
+        const c = Geometry.hexCorners(hex.cx, hex.cy, co);
+        ctx.beginPath();
+        ctx.moveTo(c[0].x, c[0].y);
+        for (let i = 1; i < 6; i++) ctx.lineTo(c[i].x, c[i].y);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+  }
+
+  // -- Build counters -----------------------------------------------------------
+
+  const COLORS = [
+    '#cc4444', '#4477cc', '#44aa44', '#cc8833',
+    '#9944cc', '#229988', '#cc4488', '#888833',
+    '#3366bb', '#bb6633', '#44bbbb', '#bb4466',
+  ];
+
+  const rng          = mulberry32(0xdeadbeef);
+  const colorLayer   = new ColorLayer();
+  const counterLayer = new CounterLayer();
+  const minimapLayer = new MinimapLayer({ width: 220, height: 220, corner: 'bottom-right' });
+
+  for (let i = 0; i < N_COUNTERS; i++) {
+    const row   = Math.floor(rng() * ROWS);
+    const col   = Math.floor(rng() * COLS);
+    const size  = rng() < 0.4 ? 'small' : 'large';
+    const color = COLORS[Math.floor(rng() * COLORS.length)];
+    counterLayer.addCounter(new Counter({ id: 'c' + i, row, col, size, color }));
+  }
+
+  // -- Build map ----------------------------------------------------------------
+
+  const map = new HexMap(document.getElementById('map-canvas'), {
+    rows: ROWS, cols: COLS, hexSize: 40,
+    orientation: POINTY_TOP,
+    offsetParity: OFFSET_ODD,
+    originCorner: 'top-left',
+    rotationStep: 60,
+    background: '#f0ede0',
+  });
+
+  map.getLayer('hex-label').visible  = false;
+  map.getLayer('center-dot').visible = false;
+  map.addLayer(colorLayer,   0);  // below outlines
+  map.addLayer(counterLayer);     // above outlines
+  map.addLayer(minimapLayer);     // top of stack (screen-space)
+
+  // -- FPS display --------------------------------------------------------------
+
+  let frames = 0, fpsTs = performance.now();
+  const fpsEl = document.getElementById('fps');
+
+  (function tick() {
+    frames++;
+    const now = performance.now();
+    if (now - fpsTs >= 1000) {
+      fpsEl.textContent = frames + ' fps';
+      frames = 0;
+      fpsTs = now;
+    }
+    requestAnimationFrame(tick);
+  })();
+
+  // -- Controls -----------------------------------------------------------------
+
+  const DEG = '°';
+
+  document.getElementById('chk-outline').addEventListener('change', e =>
+    map.setLayerVisible('hex-outline', e.target.checked));
+  document.getElementById('chk-label').addEventListener('change', e =>
+    map.setLayerVisible('hex-label', e.target.checked));
+  document.getElementById('chk-dot').addEventListener('change', e =>
+    map.setLayerVisible('center-dot', e.target.checked));
+  document.getElementById('chk-color').addEventListener('change', e =>
+    map.setLayerVisible('color', e.target.checked));
+  document.getElementById('chk-counters').addEventListener('change', e =>
+    map.setLayerVisible('counters', e.target.checked));
+  document.getElementById('chk-minimap').addEventListener('change', e =>
+    map.setLayerVisible('minimap', e.target.checked));
+
+  document.getElementById('col-bg').addEventListener('input', e => {
+    map.background = e.target.value;
+    map.refresh();
+  });
+
+  document.getElementById('btn-cw').addEventListener('click', () => {
+    map.rotateBy(1);
+    document.getElementById('rot-val').textContent = map.getRotation() + DEG;
+  });
+  document.getElementById('btn-ccw').addEventListener('click', () => {
+    map.rotateBy(-1);
+    document.getElementById('rot-val').textContent = map.getRotation() + DEG;
+  });
+  document.getElementById('btn-fit').addEventListener('click', () => {
+    map.fitToView();
+    document.getElementById('rot-val').textContent = map.getRotation() + DEG;
+  });
+
+  map.on('hexHover', ({ row, col }) => {
+    document.getElementById('status').textContent =
+      'row ' + String(row).padStart(4, '0') +
+      '  col ' + String(col).padStart(4, '0') +
+      '  ->  ' + map.getHexLabel(row, col);
+  });
+
+  map.on('viewportChange', ({ angle }) => {
+    document.getElementById('rot-val').textContent =
+      Math.round((((angle * 180 / Math.PI) % 360) + 360) % 360) + DEG;
+  });
+
+})();
+</script>
+</body>
+</html>

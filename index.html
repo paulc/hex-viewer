@@ -79,6 +79,20 @@ input[type=color] {
   font-size: 13px;
 }
 
+input[type=range] {
+  width: 80px;
+  cursor: pointer;
+  vertical-align: middle;
+  accent-color: #4a8ab8;
+}
+
+.scale-val {
+  min-width: 2.8em;
+  display: inline-block;
+  color: #6ab0d8;
+  font-size: 12px;
+}
+
 #status {
   margin-left: auto;
   color: #4a6a88;
@@ -111,6 +125,17 @@ input[type=color] {
       <label><input type="checkbox" id="chk-label"   checked> Numbers</label>
       <label><input type="checkbox" id="chk-dot"     checked> Dots</label>
       <label><input type="checkbox" id="chk-color">          Colors</label>
+      <label><input type="checkbox" id="chk-counters" checked> Counters</label>
+    </div>
+
+    <div class="sep"></div>
+
+    <!-- Counter size sliders -->
+    <div class="group">
+      <label>Large <input type="range" id="sld-large" min="0.5" max="2.0" step="0.05" value="1.15">
+        <span class="scale-val" id="val-large">1.15</span></label>
+      <label>Small <input type="range" id="sld-small" min="0.5" max="2.0" step="0.05" value="0.85">
+        <span class="scale-val" id="val-small">0.85</span></label>
     </div>
 
     <div class="sep"></div>
@@ -176,11 +201,13 @@ input[type=color] {
 </div>
 
 <script src="src/hexviewer.js"></script>
+<script src="src/counter-layer.js"></script>
 <script>
 (function () {
-  const { HexMap, Layer, Geometry, FLAT_TOP, POINTY_TOP, OFFSET_ODD, OFFSET_EVEN } = window.HexViewer;
+  const { HexMap, Layer, Geometry, FLAT_TOP, POINTY_TOP, OFFSET_ODD, OFFSET_EVEN,
+          Counter, CounterLayer } = window.HexViewer;
 
-  // ── Sample custom layer: random pastel fills ────────────────────────────────
+  // -- Sample custom layer: random pastel fills --------------------------------
   class ColorLayer extends Layer {
     constructor(rows, cols) {
       super('color', false);
@@ -204,7 +231,21 @@ input[type=color] {
   }
 
   const ROWS = 20, COLS = 30;
-  const colorLayer = new ColorLayer(ROWS, COLS);
+  const colorLayer   = new ColorLayer(ROWS, COLS);
+  const counterLayer = new CounterLayer();
+
+  // Sample counters: a couple of stacks and some lone counters
+  [
+    new Counter({ id: 'a1', row: 3,  col: 5,  size: 'large', color: '#cc4444' }),
+    new Counter({ id: 'a2', row: 3,  col: 5,  size: 'large', color: '#4477cc' }),
+    new Counter({ id: 'a3', row: 3,  col: 5,  size: 'small', color: '#44aa44' }),
+    new Counter({ id: 'b1', row: 8,  col: 12, size: 'large', color: '#cc8833' }),
+    new Counter({ id: 'b2', row: 8,  col: 12, size: 'small', color: '#9944cc' }),
+    new Counter({ id: 'c1', row: 5,  col: 20, size: 'large', color: '#229988' }),
+    new Counter({ id: 'd1', row: 15, col: 7,  size: 'small', color: '#cc4488' }),
+    new Counter({ id: 'd2', row: 15, col: 7,  size: 'large', color: '#888833' }),
+  ].forEach(c => counterLayer.addCounter(c));
+
   let map = null;
 
   function applyColors() {
@@ -230,14 +271,16 @@ input[type=color] {
       orientation, originCorner, offsetParity, rotationStep,
     });
 
-    // Insert colour layer below the built-ins
+    // Insert colour layer below the built-ins, counter layer on top
     map.addLayer(colorLayer, 0);
+    map.addLayer(counterLayer);
 
     // Restore checkbox visibility
     map.setLayerVisible('hex-outline', document.getElementById('chk-outline').checked);
     map.setLayerVisible('hex-label',   document.getElementById('chk-label').checked);
     map.setLayerVisible('center-dot',  document.getElementById('chk-dot').checked);
     map.setLayerVisible('color',       document.getElementById('chk-color').checked);
+    map.setLayerVisible('counters',    document.getElementById('chk-counters').checked);
 
     // Apply current colour picker values
     applyColors();
@@ -261,24 +304,37 @@ input[type=color] {
     document.getElementById('rot-val').textContent = `${map.getRotation()}°`;
   }
 
-  // ── Layer checkboxes ─────────────────────────────────────────────────────────
+  // -- Layer checkboxes ---------------------------------------------------------
   document.getElementById('chk-outline').addEventListener('change', e => map.setLayerVisible('hex-outline', e.target.checked));
   document.getElementById('chk-label').addEventListener('change',   e => map.setLayerVisible('hex-label',   e.target.checked));
   document.getElementById('chk-dot').addEventListener('change',     e => map.setLayerVisible('center-dot',  e.target.checked));
-  document.getElementById('chk-color').addEventListener('change',   e => map.setLayerVisible('color',       e.target.checked));
+  document.getElementById('chk-color').addEventListener('change',    e => map.setLayerVisible('color',    e.target.checked));
+  document.getElementById('chk-counters').addEventListener('change', e => map.setLayerVisible('counters', e.target.checked));
 
-  // ── Colour pickers ───────────────────────────────────────────────────────────
+  // -- Counter size sliders -----------------------------------------------------
+  document.getElementById('sld-large').addEventListener('input', e => {
+    counterLayer.largeScale = parseFloat(e.target.value);
+    document.getElementById('val-large').textContent = parseFloat(e.target.value).toFixed(2);
+    map.refresh();
+  });
+  document.getElementById('sld-small').addEventListener('input', e => {
+    counterLayer.smallScale = parseFloat(e.target.value);
+    document.getElementById('val-small').textContent = parseFloat(e.target.value).toFixed(2);
+    map.refresh();
+  });
+
+  // -- Colour pickers -----------------------------------------------------------
   document.getElementById('col-bg').addEventListener('input',     () => applyColors());
   document.getElementById('col-border').addEventListener('input', () => applyColors());
   document.getElementById('col-number').addEventListener('input', () => applyColors());
   document.getElementById('col-dot').addEventListener('input',    () => applyColors());
 
-  // ── Grid selects ─────────────────────────────────────────────────────────────
+  // -- Grid selects -------------------------------------------------------------
   document.getElementById('sel-orient').addEventListener('change', buildMap);
   document.getElementById('sel-origin').addEventListener('change', buildMap);
   document.getElementById('sel-parity').addEventListener('change', buildMap);
 
-  // ── Rotation ─────────────────────────────────────────────────────────────────
+  // -- Rotation -----------------------------------------------------------------
   document.getElementById('btn-cw').addEventListener('click', () => {
     map.rotateBy(1);
     document.getElementById('rot-val').textContent = `${map.getRotation()}°`;
@@ -291,7 +347,7 @@ input[type=color] {
     map.rotationStep = parseInt(e.target.value, 10);
   });
 
-  // ── Fit ───────────────────────────────────────────────────────────────────────
+  // -- Fit -----------------------------------------------------------------------
   document.getElementById('btn-fit').addEventListener('click', () => {
     map.fitToView();
     document.getElementById('rot-val').textContent = `${map.getRotation()}°`;
