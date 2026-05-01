@@ -321,6 +321,21 @@ All three modes clip to the visible viewport before drawing:
 
 The map bounding box (used by fill mode) is computed once on first render and cached until the layer is re-attached.
 
+**Per-frame cost is O(visible pixels)**, not O(image size). A 4096×4096 fill image and a 512×512 fill image cost the same to render at a given zoom level, because only the on-screen crop is ever transferred to the GPU.
+
+**GPU texture size limit.** Browsers upload the whole image to the GPU as a texture when it is first drawn. Most devices support up to 4096×4096 or 8192×8192 pixels; images larger than this may be silently downscaled by the browser. Practical guidance:
+
+| Image size | Notes |
+|---|---|
+| ≤ 2048×2048 | Safe on all hardware including mobile |
+| 4096×4096 | Safe on desktop and modern mobile |
+| 8192×8192 | Works on most desktop GPUs; may fail on low-end mobile |
+| > 8192×8192 | Risky — browser may silently downscale or refuse |
+
+For a scanned board game map used as a fill image, **2048×2048 or 4096×4096 is recommended**.
+
+**No quadtree needed.** The `tile` mode already handles repeating patterns efficiently by drawing only the visible tiles each frame. A quadtree/LOD system (like Leaflet's tile pyramid) is only warranted when you need to stream many different image chunks at multiple zoom levels from a server — that is a different use case. For a single background image or a simple repeating texture, `fill` or `tile` mode gives acceptable performance without extra complexity.
+
 ### Runtime control
 
 ```js
