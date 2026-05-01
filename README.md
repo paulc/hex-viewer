@@ -6,10 +6,11 @@ A plain HTML + JavaScript framework for viewing hex-based board game maps. No bu
 
 ```
 index.html              demo / reference implementation
-demo-perf.html          performance demo (1000x1000 grid, 8000 counters, minimap)
+demo-perf.html          performance demo (1000x1000 grid, 24000 counters, minimap)
 src/
   hexviewer.js          core framework (exposes window.HexViewer)
   counter-layer.js      counter layer module (exposes window.HexViewer.Counter / CounterLayer)
+  image-layer.js        image layer module (exposes window.HexViewer.ImageLayer)
 ```
 
 Game-specific modules can be added under `src/` and loaded with additional `<script>` tags.
@@ -232,6 +233,123 @@ new HexViewer.MinimapLayer(options)
 | `corner` | string | `'bottom-right'` | `'top-left'`, `'top-right'`, `'bottom-left'`, or `'bottom-right'` |
 
 The viewport indicator is drawn as a correctly rotated quadrilateral when the map is rotated. Clicking or dragging the minimap pans the viewport to the corresponding world position.
+
+---
+
+## Image layer (`src/image-layer.js`)
+
+Load after `hexviewer.js`. Exposes `window.HexViewer.ImageLayer`.
+
+```html
+<script src="src/hexviewer.js"></script>
+<script src="src/image-layer.js"></script>
+```
+
+Places a PNG (or any canvas-drawable image) in world space so it pans, zooms, and rotates with the hex grid. Three modes are supported.
+
+```js
+new HexViewer.ImageLayer(name, image, options)
+```
+
+`image` may be an `HTMLImageElement`, `HTMLCanvasElement`, `ImageBitmap`, or a URL string. URL strings load asynchronously and trigger a refresh when ready.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `mode` | string | `'fill'` | `'fill'`, `'anchor'`, or `'tile'` |
+| `alpha` | number | `1` | Opacity 0–1; adjustable at runtime |
+| `visible` | boolean | `true` | Initial visibility |
+
+Shared anchor/fill option:
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `x`, `y` | number | `0, 0` | World-space top-left of the image |
+| `row`, `col` | number | — | Hex to centre the image on (overrides `x`/`y`) |
+| `width`, `height` | number | image px × `scale` | Image extent in world units |
+| `scale` | number | `1` | Pixels-to-world-units multiplier |
+
+Tile-only options:
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `tileWidth` | number | image width px | World-unit width of one tile |
+| `tileHeight` | number | image height px | World-unit height of one tile |
+| `originX`, `originY` | number | `0, 0` | World-space tiling origin |
+
+### Modes
+
+**`'fill'`** — stretches the image to cover the full hex grid extent. The bounding box is computed from the actual hex corner positions and cached.
+
+```js
+// Map scan stretched to fill the whole grid
+const mapImg = new HexViewer.ImageLayer('map', 'map.png', {
+  mode: 'fill', alpha: 0.85,
+});
+map.addLayer(mapImg, 0);   // insert below hex outlines
+```
+
+**`'anchor'`** — places the image at fixed world coordinates or centred on a specific hex.
+
+```js
+// Icon centred on hex (5, 10), 60×60 world units
+const icon = new HexViewer.ImageLayer('icon', iconImg, {
+  mode: 'anchor', row: 5, col: 10, width: 60, height: 60,
+});
+
+// Image at explicit world position
+const marker = new HexViewer.ImageLayer('marker', markerImg, {
+  mode: 'anchor', x: 200, y: 150, width: 80, height: 80, alpha: 0.9,
+});
+```
+
+**`'tile'`** — repeats the image across the visible area. Only tiles that intersect the viewport are drawn, making this efficient even for large grids.
+
+```js
+// Parchment texture tiled at 80×80 world units (2× hexSize)
+const bg = new HexViewer.ImageLayer('bg', 'parchment.png', {
+  mode: 'tile', tileWidth: 80, tileHeight: 80, alpha: 0.7,
+});
+map.addLayer(bg, 0);
+```
+
+### Performance
+
+All three modes clip to the visible viewport before drawing:
+
+- **fill / anchor** — use the 9-argument `drawImage(img, sx,sy,sw,sh, dx,dy,dw,dh)` form so only the visible crop of the source image is submitted to the GPU each frame.
+- **tile** — computes the tile-index range that overlaps the visible AABB and draws only those tiles; off-screen tiles are never touched.
+
+The map bounding box (used by fill mode) is computed once on first render and cached until the layer is re-attached.
+
+### Runtime control
+
+```js
+layer.alpha   = 0.5;   // change opacity
+layer.visible = false; // hide (same as map.setLayerVisible)
+map.refresh();         // force redraw after property change
+```
+
+### Generated images (no file needed)
+
+A canvas element can be passed directly, which is useful for procedurally generated backgrounds:
+
+```js
+function makeParchmentTile(size) {
+  const el = document.createElement('canvas');
+  el.width = el.height = size;
+  const c = el.getContext('2d');
+  c.fillStyle = '#ddd3a8';
+  c.fillRect(0, 0, size, size);
+  c.strokeStyle = 'rgba(120,95,45,0.2)';
+  c.strokeRect(0.5, 0.5, size - 1, size - 1);
+  return el;
+}
+
+const bg = new HexViewer.ImageLayer('bg', makeParchmentTile(128), {
+  mode: 'tile', tileWidth: 80, tileHeight: 80, alpha: 0.7,
+});
+map.addLayer(bg, 0);
+```
 
 ---
 
