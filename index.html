@@ -168,6 +168,7 @@ input[type=range] {
     <div class="group">
       <label><input type="checkbox" id="chk-img-tile"> Tile BG</label>
       <label><input type="checkbox" id="chk-img-fill"> Fill BG</label>
+      <label><input type="checkbox" id="chk-img-anchor"> Anchor</label>
       <label>Img&nbsp;alpha
         <input type="range" id="sld-img-alpha" min="0" max="1" step="0.05" value="0.70">
         <span class="scale-val" id="val-img-alpha">0.70</span></label>
@@ -356,6 +357,48 @@ input[type=range] {
     return el;
   }
 
+  // Anchor image: a circular map-marker icon with a compass rose, centred on a hex
+  function makeAnchorImg(size) {
+    const el = document.createElement('canvas');
+    el.width = el.height = size;
+    const c = el.getContext('2d');
+    const h = size / 2;
+    // Drop shadow
+    c.fillStyle = 'rgba(0,0,0,0.28)';
+    c.beginPath(); c.ellipse(h + 3, h + 3, h - 4, h - 4, 0, 0, Math.PI * 2); c.fill();
+    // Background circle
+    const bg = c.createRadialGradient(h - 4, h - 6, 2, h, h, h - 3);
+    bg.addColorStop(0, '#f5eec8');
+    bg.addColorStop(1, '#c8a84a');
+    c.fillStyle = bg;
+    c.beginPath(); c.arc(h, h, h - 3, 0, Math.PI * 2); c.fill();
+    // Border
+    c.strokeStyle = '#7a5a18';
+    c.lineWidth = size * 0.04;
+    c.stroke();
+    // Compass rose: N/S/E/W points
+    const pts = [[0, -1], [0, 1], [1, 0], [-1, 0]];
+    const labels = ['N', 'S', 'E', 'W'];
+    const r = h * 0.55;
+    pts.forEach(([dx, dy], i) => {
+      c.fillStyle = (i === 0) ? '#c03030' : '#3a2a08';
+      c.beginPath();
+      c.moveTo(h + dx * r, h + dy * r);
+      c.lineTo(h + dy * r * 0.25, h - dx * r * 0.25);
+      c.lineTo(h, h);
+      c.lineTo(h - dy * r * 0.25, h + dx * r * 0.25);
+      c.closePath(); c.fill();
+      c.fillStyle = '#3a2a08';
+      c.font = `bold ${size * 0.14}px serif`;
+      c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.fillText(labels[i], h + dx * (r + size * 0.1), h + dy * (r + size * 0.1));
+    });
+    // Centre dot
+    c.fillStyle = '#3a2a08';
+    c.beginPath(); c.arc(h, h, size * 0.05, 0, Math.PI * 2); c.fill();
+    return el;
+  }
+
   // tileWidth/tileHeight in world units — 2x hexSize keeps tiles a sensible size
   const tileLayer = new ImageLayer('bg-tile', makeTileImg(), {
     mode: 'tile', tileWidth: 80, tileHeight: 80, alpha: 0.70, visible: false,
@@ -363,6 +406,12 @@ input[type=range] {
 
   const fillLayer = new ImageLayer('map-fill', makeMapFillImg(), {
     mode: 'fill', alpha: 0.70, visible: false,
+  });
+
+  // Anchor at hex (3, 5) — same hex as the 3-counter stack, sized to fill the hex
+  // width = height = hexSize * sqrt(3) ~= 69 world units
+  const anchorLayer = new ImageLayer('anchor-icon', makeAnchorImg(128), {
+    mode: 'anchor', row: 3, col: 5, width: 69, height: 69, alpha: 0.90, visible: false,
   });
 
   let map = null;
@@ -486,10 +535,11 @@ input[type=range] {
     });
 
     // Layer order bottom-to-top: tile, fill, color, hex-outline, hex-label,
-    // center-dot, counters, infoPanel, selPanel
+    // center-dot, anchor, counters, infoPanel, selPanel
     map.addLayer(tileLayer,   0);
     map.addLayer(fillLayer,   1);
     map.addLayer(colorLayer,  2);
+    map.addLayer(anchorLayer, 3);   // above hex outlines so it sits on top of the grid
     map.addLayer(counterLayer);
     map.addLayer(infoPanel);
     map.addLayer(selPanel);
@@ -497,6 +547,7 @@ input[type=range] {
     // Restore checkbox visibility
     map.setLayerVisible('bg-tile',     document.getElementById('chk-img-tile').checked);
     map.setLayerVisible('map-fill',    document.getElementById('chk-img-fill').checked);
+    map.setLayerVisible('anchor-icon', document.getElementById('chk-img-anchor').checked);
     map.setLayerVisible('hex-outline', document.getElementById('chk-outline').checked);
     map.setLayerVisible('hex-label',   document.getElementById('chk-label').checked);
     map.setLayerVisible('center-dot',  document.getElementById('chk-dot').checked);
@@ -529,12 +580,14 @@ input[type=range] {
   }
 
   // -- Image layer controls -----------------------------------------------------
-  document.getElementById('chk-img-tile').addEventListener('change', e => map.setLayerVisible('bg-tile',  e.target.checked));
-  document.getElementById('chk-img-fill').addEventListener('change', e => map.setLayerVisible('map-fill', e.target.checked));
+  document.getElementById('chk-img-tile').addEventListener('change',   e => map.setLayerVisible('bg-tile',     e.target.checked));
+  document.getElementById('chk-img-fill').addEventListener('change',   e => map.setLayerVisible('map-fill',    e.target.checked));
+  document.getElementById('chk-img-anchor').addEventListener('change', e => map.setLayerVisible('anchor-icon', e.target.checked));
   document.getElementById('sld-img-alpha').addEventListener('input', e => {
     const v = parseFloat(e.target.value);
-    tileLayer.alpha = v;
-    fillLayer.alpha = v;
+    tileLayer.alpha   = v;
+    fillLayer.alpha   = v;
+    anchorLayer.alpha = v;
     document.getElementById('val-img-alpha').textContent = v.toFixed(2);
     map.refresh();
   });
