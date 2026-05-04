@@ -11,6 +11,7 @@ src/
   hexviewer.js          core framework (exposes window.HexViewer)
   counter-layer.js      counter layer module (exposes window.HexViewer.Counter / CounterLayer)
   image-layer.js        image layer module (exposes window.HexViewer.ImageLayer)
+  map-details-layer.js  connectors and hex-edge borders (exposes window.HexViewer.MapDetailsLayer)
 ```
 
 Game-specific modules can be added under `src/` and loaded with additional `<script>` tags.
@@ -568,6 +569,100 @@ ctxMenu.addEventListener('click', e => {
 // Dismiss on outside click or Escape
 document.addEventListener('click',   e => { if (!ctxMenu.contains(e.target)) ctxMenu.style.display = 'none'; }, true);
 document.addEventListener('keydown', e => { if (e.key === 'Escape') ctxMenu.style.display = 'none'; });
+```
+
+---
+
+## Map details layer (`src/map-details-layer.js`)
+
+Load after `hexviewer.js`. Exposes `window.HexViewer.MapDetailsLayer`.
+
+```html
+<script src="src/hexviewer.js"></script>
+<script src="src/map-details-layer.js"></script>
+```
+
+Draws connectors (lines between hex centres) and border segments (highlighted hex edges) in world space.
+
+```js
+const details = new HexViewer.MapDetailsLayer('map-details');
+map.addLayer(details);
+```
+
+All methods return `this` for chaining. Calling any add method triggers a single redraw.
+
+### Connectors
+
+A connector is a straight line between two hex centres, optionally inset from each end.
+
+```js
+details.addConnector({ from, to, fromOffset, toOffset, width, color, alpha, dash })
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `from` | `{row, col}` | required | Source hex |
+| `to` | `{row, col}` | required | Target hex |
+| `fromOffset` | number | `0` | Pull line back this many world units from the source centre |
+| `toOffset` | number | `0` | Pull line back this many world units from the target centre |
+| `width` | number | `2` | Stroke width in world units |
+| `color` | string | `'#ffffff'` | Stroke colour |
+| `alpha` | number | `1.0` | Opacity 0–1 |
+| `dash` | number[] | `[]` | `setLineDash` pattern; `[]` = solid |
+
+```js
+// Solid connector between two hexes
+details.addConnector({ from: { row: 2, col: 3 }, to: { row: 5, col: 8 },
+                       color: '#ffaa00', width: 3 });
+
+// Dashed connector pulled back 10 units from each hex centre
+details.addConnector({ from: { row: 0, col: 0 }, to: { row: 10, col: 10 },
+                       fromOffset: 10, toOffset: 10,
+                       color: '#4488ff', dash: [8, 4] });
+```
+
+### Borders
+
+A border highlights a single edge of a hex. The edge is identified by its index (0–5), where the edges are numbered clockwise starting from corner 0. Endpoints are drawn with rounded line caps.
+
+```js
+details.addBorder({ row, col, edge, width, color, alpha, dash })
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `row` | number | required | Hex row |
+| `col` | number | required | Hex column |
+| `edge` | number | required | Edge index 0–5, clockwise from corner 0 |
+| `width` | number | `2` | Stroke width in world units |
+| `color` | string | `'#ffffff'` | Stroke colour |
+| `alpha` | number | `1.0` | Opacity 0–1 |
+| `dash` | number[] | `[]` | `setLineDash` pattern; `[]` = solid |
+
+```js
+// Highlight edge 0 of hex (3, 5) in red
+details.addBorder({ row: 3, col: 5, edge: 0, color: '#ff4444', width: 4 });
+```
+
+#### Batch borders
+
+```js
+details.addBorderSegments(segments, sharedStyle)
+```
+
+`segments` is an array of `{ row, col, edge }` objects. `sharedStyle` applies the same `width`, `color`, `alpha`, and `dash` to all of them. A single redraw is triggered after all segments are added.
+
+```js
+details.addBorderSegments(
+  [{ row: 1, col: 1, edge: 0 }, { row: 1, col: 1, edge: 1 }, { row: 2, col: 3, edge: 4 }],
+  { color: '#ff0000', width: 3 }
+);
+```
+
+### Clearing
+
+```js
+details.clearAll()   // remove all connectors and borders, trigger redraw
 ```
 
 ---

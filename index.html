@@ -226,6 +226,37 @@ input[type=range] {
 
     <div class="sep"></div>
 
+    <!-- Details layer controls -->
+    <div class="group">
+      <label>Details
+        <select id="sel-det-mode">
+          <option value="off">Off</option>
+          <option value="connector">Connector</option>
+          <option value="border">Border</option>
+        </select>
+      </label>
+      <label title="Line colour"><input type="color" id="col-det" value="#ff8800"> Color</label>
+      <label>Width
+        <input type="range" id="sld-det-w" min="1" max="10" step="0.5" value="2">
+        <span class="scale-val" id="val-det-w">2.0</span></label>
+      <label>Alpha
+        <input type="range" id="sld-det-alpha" min="0" max="1" step="0.05" value="1">
+        <span class="scale-val" id="val-det-alpha">1.00</span></label>
+      <label>Dash
+        <select id="sel-det-dash">
+          <option value="">Solid</option>
+          <option value="8,4">Dashed</option>
+          <option value="2,4">Dotted</option>
+        </select>
+      </label>
+      <label>Offset
+        <input type="range" id="sld-det-offset" min="0" max="30" step="1" value="0">
+        <span class="scale-val" id="val-det-offset">0</span></label>
+      <button id="btn-det-clear">Clear</button>
+    </div>
+
+    <div class="sep"></div>
+
     <button id="btn-fit">Fit</button>
 
     <span id="status">hover over a hex</span>
@@ -239,10 +270,11 @@ input[type=range] {
 <script src="src/hexviewer.js"></script>
 <script src="src/counter-layer.js"></script>
 <script src="src/image-layer.js"></script>
+<script src="src/map-details-layer.js"></script>
 <script>
 (function () {
   const { HexMap, Layer, Geometry, FLAT_TOP, POINTY_TOP, OFFSET_ODD, OFFSET_EVEN,
-          Counter, CounterLayer, PanelLayer, ImageLayer } = window.HexViewer;
+          Counter, CounterLayer, PanelLayer, ImageLayer, MapDetailsLayer } = window.HexViewer;
 
   // -- Sample custom layer: random pastel fills --------------------------------
   class ColorLayer extends Layer {
@@ -544,11 +576,13 @@ input[type=range] {
     });
 
     // Layer order bottom-to-top: tile, fill, color, hex-outline, hex-label,
-    // center-dot, anchor, counters, infoPanel, selPanel
+    // center-dot, anchor, details, counters, infoPanel, selPanel
     map.addLayer(tileLayer,   0);
     map.addLayer(fillLayer,   1);
     map.addLayer(colorLayer,  2);
     map.addLayer(anchorLayer, 3);   // above hex outlines so it sits on top of the grid
+    detConnFrom = null;
+    map.addLayer(detailsLayer);
     map.addLayer(counterLayer);
     map.addLayer(infoPanel);
     map.addLayer(selPanel);
@@ -648,6 +682,90 @@ input[type=range] {
   document.getElementById('btn-fit').addEventListener('click', () => {
     map.fitToView();
     document.getElementById('rot-val').textContent = `${map.getRotation()}°`;
+  });
+
+  // -- Details layer (connectors + borders) ------------------------------------
+
+  const detailsLayer = new MapDetailsLayer('map-details');
+  let detConnFrom = null;
+  const detCanvas = document.getElementById('map-canvas');
+
+  function getDetStyle() {
+    const dashVal = document.getElementById('sel-det-dash').value;
+    return {
+      color: document.getElementById('col-det').value,
+      width: parseFloat(document.getElementById('sld-det-w').value),
+      alpha: parseFloat(document.getElementById('sld-det-alpha').value),
+      dash:  dashVal ? dashVal.split(',').map(Number) : [],
+    };
+  }
+
+  function nearestHexEdge(row, col, wx, wy) {
+    const { x: cx, y: cy } = Geometry.offsetToPixel(row, col, map._layout);
+    const co = map.cornerOffsets;
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < 6; i++) {
+      const mx = cx + (co[i].dx + co[(i + 1) % 6].dx) / 2;
+      const my = cy + (co[i].dy + co[(i + 1) % 6].dy) / 2;
+      const d  = (wx - mx) ** 2 + (wy - my) ** 2;
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+  }
+
+  detCanvas.addEventListener('click', e => {
+    if (!map) return;
+    const mode = document.getElementById('sel-det-mode').value;
+    if (mode === 'off') return;
+
+    const { wx, wy } = map.screenToWorld(e.clientX, e.clientY);
+    const { row, col } = Geometry.pixelToOffset(wx, wy, map._layout);
+    if (row < 0 || row >= map._rows || col < 0 || col >= map._cols) return;
+
+    const statusEl = document.getElementById('status');
+
+    if (mode === 'connector') {
+      if (!detConnFrom) {
+        detConnFrom = { row, col };
+        statusEl.textContent = `Connector from ${map.getHexLabel(row, col)} — click target hex`;
+      } else {
+        const offset = parseInt(document.getElementById('sld-det-offset').value, 10);
+        detailsLayer.addConnector({
+          from: detConnFrom, to: { row, col },
+          fromOffset: offset, toOffset: offset,
+          ...getDetStyle(),
+        });
+        detConnFrom = null;
+        statusEl.textContent = 'Connector added — click source hex';
+      }
+    } else if (mode === 'border') {
+      const edge = nearestHexEdge(row, col, wx, wy);
+      detailsLayer.addBorder({ row, col, edge, ...getDetStyle() });
+      statusEl.textContent = `Border on ${map.getHexLabel(row, col)} edge ${edge}`;
+    }
+  });
+
+  document.getElementById('sel-det-mode').addEventListener('change', e => {
+    detConnFrom = null;
+    detCanvas.style.cursor = e.target.value === 'off' ? '' : 'crosshair';
+    const hints = { off: 'hover over a hex', connector: 'Click source hex',
+                    border: 'Click near a hex edge' };
+    document.getElementById('status').textContent = hints[e.target.value];
+  });
+
+  document.getElementById('sld-det-w').addEventListener('input', e => {
+    document.getElementById('val-det-w').textContent = parseFloat(e.target.value).toFixed(1);
+  });
+  document.getElementById('sld-det-alpha').addEventListener('input', e => {
+    document.getElementById('val-det-alpha').textContent = parseFloat(e.target.value).toFixed(2);
+  });
+  document.getElementById('sld-det-offset').addEventListener('input', e => {
+    document.getElementById('val-det-offset').textContent = e.target.value;
+  });
+  document.getElementById('btn-det-clear').addEventListener('click', () => {
+    detailsLayer.clearAll();
+    detConnFrom = null;
+    document.getElementById('status').textContent = 'Cleared';
   });
 
   buildMap();
