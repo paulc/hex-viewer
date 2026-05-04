@@ -233,6 +233,7 @@ input[type=range] {
           <option value="off">Off</option>
           <option value="connector">Connector</option>
           <option value="border">Border</option>
+          <option value="path">Path</option>
         </select>
       </label>
       <label title="Line colour"><input type="color" id="col-det" value="#ff8800"> Color</label>
@@ -271,10 +272,12 @@ input[type=range] {
 <script src="src/counter-layer.js"></script>
 <script src="src/image-layer.js"></script>
 <script src="src/map-details-layer.js"></script>
+<script src="src/hex-pathfinder.js"></script>
 <script>
 (function () {
   const { HexMap, Layer, Geometry, FLAT_TOP, POINTY_TOP, OFFSET_ODD, OFFSET_EVEN,
-          Counter, CounterLayer, PanelLayer, ImageLayer, MapDetailsLayer } = window.HexViewer;
+          Counter, CounterLayer, PanelLayer, ImageLayer, MapDetailsLayer,
+          findPath } = window.HexViewer;
 
   // -- Sample custom layer: random pastel fills --------------------------------
   class ColorLayer extends Layer {
@@ -582,6 +585,7 @@ input[type=range] {
     map.addLayer(colorLayer,  2);
     map.addLayer(anchorLayer, 3);   // above hex outlines so it sits on top of the grid
     detConnFrom = null;
+    detPathFrom  = null;
     map.addLayer(detailsLayer);
     map.addLayer(counterLayer);
     map.addLayer(infoPanel);
@@ -688,7 +692,20 @@ input[type=range] {
 
   const detailsLayer = new MapDetailsLayer('map-details');
   let detConnFrom = null;
+  let detPathFrom  = null;
   const detCanvas = document.getElementById('map-canvas');
+
+  function nearestHexCorner(row, col, wx, wy) {
+    const { x: cx, y: cy } = Geometry.offsetToPixel(row, col, map._layout);
+    const co = map.cornerOffsets;
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < 6; i++) {
+      const dx = cx + co[i].dx - wx, dy = cy + co[i].dy - wy;
+      const d  = dx * dx + dy * dy;
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+  }
 
   function getDetStyle() {
     const dashVal = document.getElementById('sel-det-dash').value;
@@ -742,14 +759,33 @@ input[type=range] {
       const edge = nearestHexEdge(row, col, wx, wy);
       detailsLayer.addBorder({ row, col, edge, ...getDetStyle() });
       statusEl.textContent = `Border on ${map.getHexLabel(row, col)} edge ${edge}`;
+    } else if (mode === 'path') {
+      const vertex = nearestHexCorner(row, col, wx, wy);
+      if (!detPathFrom) {
+        detPathFrom = { row, col, vertex };
+        statusEl.textContent =
+          `Path from ${map.getHexLabel(row, col)} corner ${vertex} — click target corner`;
+      } else {
+        const segs = findPath(detPathFrom, { row, col, vertex }, map);
+        detPathFrom = null;
+        if (segs === null) {
+          statusEl.textContent = 'No path found — click source corner';
+        } else if (segs.length === 0) {
+          statusEl.textContent = 'Same vertex — click source corner';
+        } else {
+          detailsLayer.addBorderSegments(segs, getDetStyle());
+          statusEl.textContent = `Path: ${segs.length} edge(s) — click source corner`;
+        }
+      }
     }
   });
 
   document.getElementById('sel-det-mode').addEventListener('change', e => {
     detConnFrom = null;
+    detPathFrom  = null;
     detCanvas.style.cursor = e.target.value === 'off' ? '' : 'crosshair';
     const hints = { off: 'hover over a hex', connector: 'Click source hex',
-                    border: 'Click near a hex edge' };
+                    border: 'Click near a hex edge', path: 'Click source corner' };
     document.getElementById('status').textContent = hints[e.target.value];
   });
 

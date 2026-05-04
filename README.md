@@ -12,6 +12,7 @@ src/
   counter-layer.js      counter layer module (exposes window.HexViewer.Counter / CounterLayer)
   image-layer.js        image layer module (exposes window.HexViewer.ImageLayer)
   map-details-layer.js  connectors and hex-edge borders (exposes window.HexViewer.MapDetailsLayer)
+  hex-pathfinder.js     A* path along hex edges (exposes window.HexViewer.findPath)
 ```
 
 Game-specific modules can be added under `src/` and loaded with additional `<script>` tags.
@@ -664,6 +665,47 @@ details.addBorderSegments(
 ```js
 details.clearAll()   // remove all connectors and borders, trigger redraw
 ```
+
+---
+
+## Hex pathfinder (`src/hex-pathfinder.js`)
+
+Load after `hexviewer.js`. Exposes `window.HexViewer.findPath`.
+
+```html
+<script src="src/hexviewer.js"></script>
+<script src="src/hex-pathfinder.js"></script>
+```
+
+Finds the shortest path between two hex corners (vertices) travelling strictly along hex edges. Uses A* with a Euclidean heuristic, so among equal-length paths it prefers the geometrically straighter one.
+
+```js
+HexViewer.findPath(fromSpec, toSpec, hexMap)
+```
+
+| Parameter | Type | Description |
+|---|---|---|
+| `fromSpec` | `{row, col, vertex}` | Start corner — vertex 0–5 |
+| `toSpec`   | `{row, col, vertex}` | End corner — vertex 0–5 |
+| `hexMap`   | `HexMap` | The map whose layout and grid bounds to use |
+
+Returns an array of `{row, col, edge}` objects suitable for `addBorderSegments`, `[]` if start equals end, or `null` if no path exists (unreachable).
+
+```js
+const segs = HexViewer.findPath(
+  { row: 0, col: 0, vertex: 4 },   // top corner of hex 0,0
+  { row: 5, col: 8, vertex: 1 },   // bottom corner of hex 5,8
+  map,
+);
+
+if (segs) detailsLayer.addBorderSegments(segs, { color: '#ff8800', width: 3 });
+```
+
+### Algorithm
+
+The vertex graph has one node per hex corner (geometric point), with three edges at each interior vertex (one per adjacent hex edge). Each edge has cost 1 (all hex edges are the same length), so the shortest path minimises edge count. A* with the Euclidean heuristic guides expansion toward the goal and naturally selects the most direct route among ties.
+
+Node identity uses a rounded world-position key (`Math.round(x * 100), Math.round(y * 100)`) to handle the fact that each geometric vertex is shared by up to three hexes and would otherwise appear as multiple `{row, col, vertex}` specs.
 
 ---
 
