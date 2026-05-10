@@ -424,12 +424,14 @@ class HexDetailsLayer extends Layer {
     _precomputeEdgeGeomOffsets(hexMap) {
         const co = hexMap.cornerOffsets;
         this._edgeGeomOffsets = Array.from({ length: 6 }, (_, e) => {
-            const e1  = (e + 1) % 6;
-            const dmx = (co[e].dx + co[e1].dx) / 2;
-            const dmy = (co[e].dy + co[e1].dy) / 2;
-            // Outward unit normal: perpendicular to edge vector, pointing away from center
-            const ex  = co[e1].dx - co[e].dx;
-            const ey  = co[e1].dy - co[e].dy;
+            // Edge e is indexed by cube direction; map to the two corner-offset corners.
+            // For POINTY_TOP (yFlip=1, y-down): cube dir e spans corners c0=(11-e)%6 and c1=(c0+1)%6.
+            const c0  = (11 - e) % 6;
+            const c1  = (c0 + 1) % 6;
+            const dmx = (co[c0].dx + co[c1].dx) / 2;
+            const dmy = (co[c0].dy + co[c1].dy) / 2;
+            const ex  = co[c1].dx - co[c0].dx;
+            const ey  = co[c1].dy - co[c0].dy;
             let nx = -ey, ny = ex;
             if (nx * dmx + ny * dmy < 0) { nx = ey; ny = -ex; }
             const len = Math.sqrt(nx * nx + ny * ny);
@@ -440,15 +442,16 @@ class HexDetailsLayer extends Layer {
     _buildEdgeGeom(hex, e) {
         const co  = this._hexMap.cornerOffsets;
         const off = this._edgeGeomOffsets[e];
-        const e1  = (e + 1) % 6;
+        const c0  = (11 - e) % 6;
+        const c1  = (c0 + 1) % 6;
         const nbr = this._neighborCoords(hex.row, hex.col, e);
         return {
-            row: hex.row,            col: hex.col,            edge: e,
-            cx:  hex.cx,             cy:  hex.cy,
-            x0:  hex.cx + co[e].dx,  y0: hex.cy + co[e].dy,
-            x1:  hex.cx + co[e1].dx, y1: hex.cy + co[e1].dy,
-            mx:  hex.cx + off.dmx,   my: hex.cy + off.dmy,
-            nx:  off.nx,             ny: off.ny,
+            row: hex.row,             col: hex.col,             edge: e,
+            cx:  hex.cx,              cy:  hex.cy,
+            x0:  hex.cx + co[c0].dx,  y0:  hex.cy + co[c0].dy,
+            x1:  hex.cx + co[c1].dx,  y1:  hex.cy + co[c1].dy,
+            mx:  hex.cx + off.dmx,    my:  hex.cy + off.dmy,
+            nx:  off.nx,              ny:  off.ny,
             nbrRow: nbr ? nbr.row : -1,
             nbrCol: nbr ? nbr.col : -1,
         };
@@ -561,6 +564,7 @@ class MinimapLayer extends Layer {
         this._corner = options.corner || 'bottom-right';
         this._dragging  = false;
         this._mapBounds = null;
+        this._offscreen = null;
 
         this._onDown = this._onDown.bind(this);
         this._onMove = this._onMove.bind(this);
@@ -568,7 +572,8 @@ class MinimapLayer extends Layer {
     }
 
     onAttach(hexMap) {
-        this._mapBounds = null; // recompute for new map geometry
+        this._mapBounds = null;
+        this._offscreen = null; // invalidate stale content from previous map
         const c = hexMap._canvas;
         c.addEventListener('pointerdown', this._onDown, { capture: true });
         c.addEventListener('pointermove', this._onMove, { capture: true });
@@ -616,9 +621,13 @@ class MinimapLayer extends Layer {
         ctx.rect(mx, my, mw, mh);
         ctx.clip();
 
-        // Map area
-        ctx.fillStyle = '#c8c0b0';
-        ctx.fillRect(toMX(bounds.minX), toMY(bounds.minY), bw * sc, bh * sc);
+        // Map area — use pre-rendered offscreen canvas if available, else flat fallback
+        if (this._offscreen) {
+            ctx.drawImage(this._offscreen, mx, my, mw, mh);
+        } else {
+            ctx.fillStyle = '#c8c0b0';
+            ctx.fillRect(toMX(bounds.minX), toMY(bounds.minY), bw * sc, bh * sc);
+        }
 
         // Viewport rectangle (rotated quad in world space -> minimap)
         const { panX, panY, zoom, angle } = hexMap._viewport;
@@ -648,6 +657,58 @@ class MinimapLayer extends Layer {
         ctx.strokeRect(mx + 0.5, my + 0.5, mw - 1, mh - 1);
 
         ctx.restore(); // end screen-space transform
+    }
+
+    // Render the given layers at minimap scale into an off-screen canvas.
+    // Call this after map data is set; the result is composited by render().
+    redraw(hexMap, layers = []) {
+        if (!this._offscreen) this._offscreen = document.createElement('canvas');
+        const mmW = this._mmW, mmH = this._mmH;
+        this._offscreen.width  = mmW;
+        this._offscreen.height = mmH;
+
+        const offCtx = this._offscreen.getContext('2d');
+        const bounds = this._bounds(hexMap);
+        const bw     = bounds.maxX - bounds.minX;
+        const bh     = bounds.maxY - bounds.minY;
+        const pad    = 4;
+        const sc     = Math.min((mmW - pad * 2) / bw, (mmH - pad * 2) / bh);
+        // Transform: offscreen_px = ox + world_coord * sc
+        const ox = (mmW - bw * sc) / 2 - bounds.minX * sc;
+        const oy = (mmH - bh * sc) / 2 - bounds.minY * sc;
+
+        offCtx.fillStyle = hexMap._background || '#000';
+        offCtx.fillRect(0, 0, mmW, mmH);
+
+        offCtx.save();
+        offCtx.transform(sc, 0, 0, sc, ox, oy); // world → offscreen pixels
+
+        // All hexes (no viewport culling)
+        const { orientation, parity } = hexMap._layout;
+        const allHexes = [];
+        for (let r = 0; r < hexMap._rows; r++) {
+            for (let c = 0; c < hexMap._cols; c++) {
+                const px    = Geometry.offsetToPixel(r, c, hexMap._layout);
+                const axial = Geometry.offsetToAxial(r, c, orientation, parity);
+                allHexes.push({ row: r, col: c, q: axial.q, r: axial.r, cx: px.x, cy: px.y });
+            }
+        }
+
+        // Patch viewport so drawFns scale line widths for this render scale
+        const savedVp    = hexMap._viewport;
+        hexMap._viewport = { panX: 0, panY: 0, zoom: sc, angle: 0 };
+
+        for (const layer of layers) {
+            const savedMin      = layer.minScreenSize;
+            layer.minScreenSize = 0;
+            try   { layer.render(offCtx, hexMap, allHexes); }
+            finally { layer.minScreenSize = savedMin; }
+        }
+
+        hexMap._viewport = savedVp;
+        offCtx.restore();
+
+        hexMap._scheduleRender();
     }
 
     // -- Private ---------------------------------------------------------------

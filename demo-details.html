@@ -144,9 +144,9 @@ input[type=range] {
 (function () {
 'use strict';
 
-const { HexMap, HexDetailsLayer, PanelLayer, Geometry, POINTY_TOP, OFFSET_ODD } = window.HexViewer;
+const { HexMap, HexDetailsLayer, PanelLayer, MinimapLayer, Geometry, POINTY_TOP, OFFSET_ODD } = window.HexViewer;
 
-const ROWS = 20, COLS = 30;
+const ROWS = 40, COLS = 60;
 
 // ── Terrain types ─────────────────────────────────────────────────────────────
 
@@ -277,7 +277,9 @@ function drawEdgeFn(ctx, geom, props, hexMap) {
 
     ctx.save();
     ctx.strokeStyle = def.color;
-    ctx.lineWidth   = def.width / zoom;
+    // World-space width: scales proportionally with zoom. Floor at 0.5 screen pixels
+    // so lines stay visible when zoomed far out or on the minimap.
+    ctx.lineWidth   = Math.max(def.width, 0.5 / zoom);
     ctx.lineCap     = 'round';
 
     if (props.type === 'road') {
@@ -449,7 +451,7 @@ function makeLegendPanel() {
 
 // ── Map build ─────────────────────────────────────────────────────────────────
 
-let map, terrainLayer, edgesLayer, infoPanel;
+let map, terrainLayer, edgesLayer, infoPanel, minimap;
 
 function buildMap() {
     const canvas  = document.getElementById('map-canvas');
@@ -473,6 +475,8 @@ function buildMap() {
     infoPanel.setSize({ width: 148 });
     infoPanel.html = '<span style="color:#4a6a88;font-size:12px">hover a hex</span>';
 
+    minimap = new MinimapLayer({ width: 280, height: 200, corner: 'bottom-right' });
+
     map = new HexMap(canvas, {
         rows: ROWS, cols: COLS, hexSize: 40,
         orientation: POINTY_TOP, offsetParity: OFFSET_ODD,
@@ -483,6 +487,7 @@ function buildMap() {
     map.addLayer(edgesLayer);       // above outlines
     map.addLayer(makeLegendPanel());
     map.addLayer(infoPanel);
+    map.addLayer(minimap);
 
     map.setLayerVisible('terrain',     document.getElementById('chk-terrain').checked);
     map.setLayerVisible('edges',       document.getElementById('chk-edges').checked);
@@ -495,6 +500,7 @@ function buildMap() {
         for (let c = 0; c < COLS; c++)
             terrainLayer.setHex(r, c, { terrain: grid[r][c] });
     placeEdges(edgesLayer, grid, map);
+    minimap.redraw(map, [terrainLayer, edgesLayer]);
 
     map.on('hexHover', ({ row, col }) => {
         const hProps    = terrainLayer.getHex(row, col);
