@@ -53,7 +53,10 @@ new HexViewer.HexMap(canvasElement, options)
 | `orientation` | constant | `POINTY_TOP` | `FLAT_TOP` or `POINTY_TOP` |
 | `offsetParity` | constant | `OFFSET_ODD` | `OFFSET_ODD` or `OFFSET_EVEN` |
 | `originCorner` | string | `'top-left'` | `'top-left'` or `'bottom-left'` |
-| `getHexLabel` | function | `null` | `(row, col) => string`; default formats as `RRCC` |
+| `origin` | object | `{ x:0, y:0 }` | World-space pixel offset applied to all hex positions |
+| `startRow` | number | 0 | Row number of the first row (offsets default labels and reported coordinates) |
+| `startCol` | number | 0 | Column number of the first column |
+| `getHexLabel` | function | `null` | `(row, col) => string`; default formats as `CCRR` (zero-padded col then row) |
 | `background` | string | `null` | Canvas fill colour; `null` = transparent |
 | `rotationStep` | number | 60 | Degrees per rotate step |
 | `minZoom` | number | 0.1 | Minimum zoom level |
@@ -139,9 +142,12 @@ All built-in layers have a `visible` property (get/set) and a `name` string. Lay
 ### HexOutlineLayer (`'hex-outline'`)
 
 ```js
-layer.strokeStyle = '#556677'    // border colour
-layer.lineWidth   = 1            // width in CSS pixels (stays constant under zoom)
+layer.strokeStyle   = '#556677'  // border colour
+layer.lineWidth     = 1          // width in CSS pixels (stays constant under zoom)
+layer.minScreenSize = 8          // skip rendering when hex radius (size × zoom) is below this threshold
 ```
+
+`minScreenSize` is the hex radius in screen pixels below which outlines are not drawn. Set to `0` to always draw; increase it to hide borders sooner when zooming out, which significantly reduces draw call count for dense grids. Accepted at construction time via `options.minScreenSize`.
 
 ### HexLabelLayer (`'hex-label'`)
 
@@ -746,6 +752,22 @@ HexViewer.OFFSET_EVEN   // even-row/col offset (+1)
 
 ## Performance notes
 
-The visible-hex computation uses the viewport AABB to estimate the row/col range before iterating, so only hexes near the visible area are checked. This keeps frame cost proportional to visible hexes rather than total grid size, making large grids (e.g. 1000x1000) interactive.
+### Visible-hex culling
 
-`demo-perf.html` provides a 1000x1000 grid with 24,000 randomly placed counters (plus several explicit large stacks for warp testing), a minimap, overlay panels, context menu, and an FPS counter for benchmarking.
+`_computeVisibleHexes` uses the viewport AABB to estimate the candidate row/col range before iterating, so only hexes near the visible area are checked. The inner loop is fully inlined — no function calls and no temporary object allocations. Per-row constants (y position, stagger offset) are hoisted out of the column loop, and entire rows outside the AABB are skipped with a single compare. Frame cost is O(visible hexes), not O(grid size), making large grids (e.g. 1000×1000) interactive.
+
+### Outline rendering
+
+`HexOutlineLayer` reads corner offsets directly from the precomputed `cornerOffsets` array rather than calling `Geometry.hexCorners`, avoiding one array and six point-object allocations per hex per frame. For 20,000 visible hexes this eliminates ~140,000 short-lived allocations per frame.
+
+The `minScreenSize` threshold (default 8 px) stops outline drawing when hexes are too small to show useful detail. Borders become the dominant draw-call cost at large hex counts; hiding them below ~8 px radius (roughly 120+ columns visible on a 1920 px screen) keeps panning smooth.
+
+### General guidance
+
+| Visible hexes | Typical behaviour |
+|---|---|
+| < 5,000 | Smooth at 60 fps with all layers enabled |
+| 5,000–20,000 | Smooth with outlines; enable `minScreenSize` ≥ 8 to stay smooth |
+| > 20,000 | Raise `minScreenSize` or disable outlines entirely |
+
+`demo-perf.html` provides a 1000×1000 grid with 24,000 randomly placed counters (plus several explicit large stacks for warp testing), a minimap, overlay panels, context menu, FPS counter, and an outline `minScreenSize` slider for benchmarking.
