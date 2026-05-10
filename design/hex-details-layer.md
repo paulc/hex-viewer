@@ -18,12 +18,10 @@ that the pathfinder calls into.
 3. Support an optional user-supplied draw function that renders into each hex with properties.
 4. Support an optional user-supplied draw function that renders each edge with properties.
 5. Support both **complete** storage (every hex pre-allocated) and **sparse** storage (only hexes/edges that have been written).
-6. Allow hexes to be marked impassable (hard block — no movement type can enter).
-7. Allow edges to be marked impassable (hard block — can't cross the boundary).
-8. Allow an edge to explicitly **permit** crossing that would otherwise be blocked by a hex or adjacent edge (e.g. a gate through a wall, a ford through an impassable river).
-9. Expose a movement-cost / passability contract for the pathfinding module.
-10. Support unit types with different movement characteristics via pluggable cost functions; unit type definitions live in application code, not in this layer.
-11. Support serialisation (`toJSON` / `fromJSON`) for save/load.
+6. Support serialisation (`toJSON` / `fromJSON`) for save/load.
+
+The layer carries no movement-cost or passability semantics. Those are the responsibility of the
+application-supplied cost function passed to the pathfinding module (see Pathfinding Integration).
 
 ### Performance
 
@@ -45,16 +43,15 @@ that the pathfinder calls into.
 
 ### Hex properties
 
-A single plain object per hex, merged incrementally via `setHex`. Example shape (no fixed
-schema — entirely application-defined):
+A single plain object per hex, merged incrementally via `setHex`. The schema is entirely
+application-defined. The only convention is that terrain-type keys provide the lookup value
+the cost function uses to determine movement cost and passability:
 
 ```js
 {
-  terrain:    'forest',  // application tag
-  elevation:  3,
-  moveCost:   2,         // base cost to enter this hex
-  impassable: false,     // hard block; overrides all other movement rules
-  supply:     true,
+  terrain:   'forest',   // key used by the cost function
+  elevation: 3,
+  supply:    true,
 }
 ```
 
@@ -68,13 +65,15 @@ Properties can be set from either hex's perspective. When querying an edge the t
 
 ```js
 {
-  river:         true,
-  road:          true,
-  impassable:    false,  // hard block — can't cross from either side
-  crossableBy:   ['infantry'],  // override: these types CAN cross even if impassable
-  moveCostMod:   1,      // added to hex moveCost when crossing this edge
+  river:  true,
+  road:   true,
+  bridge: false,
 }
 ```
+
+All cost and passability decisions (impassable hexes, blocked or permitted crossings, road
+bonuses, etc.) live in the application-supplied `costFn` passed to the pathfinder — not in
+reserved property names on this layer.
 
 ### Storage modes
 
@@ -127,36 +126,6 @@ layer.getEdgeOwn(row, col, edge)       // → only this hex's edge record, no ne
 layer.clearEdge(row, col, edge)        // delete this hex's edge record
 layer.hasEdge(row, col, edge)          // → bool; true if either side has a record
 layer.forEachEdge(fn)                  // fn(row, col, edge, props) for every stored edge record
-```
-
-### Pathfinding data contract
-
-These are the three methods the pathfinding module will call. Default implementations use the
-`impassable` and `moveCost` properties with no unit-type differentiation. Replace by assigning
-to the corresponding `*Fn` property.
-
-```js
-// Is hex (row, col) enterable by unitType?
-layer.hexPassable(row, col, unitType)
-// → bool; default: props == null || !props.impassable
-
-// Can unitType cross the edge between (row,col) and its neighbour in direction `edge`?
-layer.edgeCrossable(row, col, edge, unitType)
-// → bool; default: !(ownProps?.impassable || neighbourProps?.impassable)
-
-// Total movement cost for unitType to move from (fromRow,fromCol) to (toRow,toCol) via `edge`.
-// Returns Infinity when movement is not possible.
-layer.moveCost(fromRow, fromCol, toRow, toCol, edge, unitType)
-// → number | Infinity
-```
-
-Override by replacing the pluggable functions:
-
-```js
-layer.hexPassableFn   = (row, col, props, unitType) => bool
-layer.edgeCrossableFn = (row, col, edge, ownProps, nbrProps, unitType) => bool
-layer.moveCostFn      = (fromRow, fromCol, toRow, toCol, edge,
-                         destHexProps, edgeProps, unitType) => number | Infinity
 ```
 
 ### Serialisation
@@ -258,58 +227,76 @@ should be computed once in `onAttach` and stored on the layer (`this._edgeGeomOf
 
 ## Pathfinding Integration
 
-The future pathfinder (`hex-movement.js` or similar) will be a separate module that:
+The pathfinder (`hex-movement.js` or similar) is a separate module that:
 
 1. Accepts a `HexDetailsLayer` as its terrain data source.
-2. Accepts a `unitType` argument (plain object or string; the layer's pluggable functions interpret it).
-3. Runs A* over the hex grid (hex centres as nodes, shared edges as transitions).
-4. For each candidate transition calls `layer.moveCost(from, to, edge, unitType)`.
-5. Returns an ordered array of `{row, col}` hex coordinates (the path), or `null` if unreachable.
+2. Accepts a `costFn` callback (application-supplied) and a `unitType` value (application-defined).
+3. Optionally accepts additional context (e.g. a weather modifier) passed straight through to `costFn`.
+4. Runs A* over the hex grid (hex centres as nodes, shared edges as transitions).
+5. For each candidate transition calls `costFn`; infinite cost means the transition is blocked.
+6. Returns an ordered array of `{row, col}` hex coordinates (the path), or `null` if unreachable.
+
+### costFn signature
+
+```js
+costFn(fromRow, fromCol, toRow, toCol, edge, hexProps, edgeProps, unitType, context)
+// → number | Infinity
+```
+
+| Parameter | Description |
+|---|---|
+| `fromRow, fromCol` | Origin hex coordinates |
+| `toRow, toCol` | Destination hex coordinates |
+| `edge` | Which of the 6 edges is being crossed (0–5) |
+| `hexProps` | Property record of the **destination** hex (may be `null`) |
+| `edgeProps` | Merged edge record for the shared boundary (may be `null`) |
+| `unitType` | Application-defined value (plain object, string, etc.) |
+| `context` | Optional extra data passed through from the `findPath` call (weather, supply, etc.) |
+
+All passability and cost logic lives here. Return `Infinity` to block a transition entirely.
 
 ### Unit types
 
-Unit types are plain objects defined by the application. The layer does not maintain a registry.
+Unit types are plain objects defined by the application. The layer has no awareness of them.
 
 ```js
 const ARMOR    = { name: 'armor',    wheeled: true,  naval: false };
 const INFANTRY = { name: 'infantry', wheeled: false, naval: false };
 const SHIP     = { name: 'ship',     wheeled: false, naval: true  };
 
-layer.moveCostFn = (fromR, fromC, toR, toC, edge, hexProps, edgeProps, unitType) => {
-  if (hexProps?.impassable)                        return Infinity;
-  if (unitType.naval && hexProps?.terrain !== 'sea') return Infinity;
-  if (!unitType.naval && hexProps?.terrain === 'sea') return Infinity;
+function myCostFn(fromR, fromC, toR, toC, edge, hexProps, edgeProps, unitType, ctx) {
+  const terrain = hexProps?.terrain ?? 'open';
 
-  let cost = hexProps?.moveCost ?? 1;
+  if (unitType.naval && terrain !== 'sea')  return Infinity;
+  if (!unitType.naval && terrain === 'sea') return Infinity;
 
-  // Edge effects
-  const ep = edgeProps ?? {};
-  if (ep.impassable && !ep.crossableBy?.includes(unitType.name)) return Infinity;
-  if (ep.river  && !ep.bridge) cost += unitType.wheeled ? 2 : 1;
-  if (ep.road)                 cost  = Math.max(0.5, cost * 0.5);
+  // Base cost from terrain table (application-defined)
+  let cost = TERRAIN_COST[unitType.name]?.[terrain] ?? 1;
+
+  // Edge modifiers from edge properties
+  if (edgeProps?.river && !edgeProps?.bridge) cost += unitType.wheeled ? 2 : 1;
+  if (edgeProps?.road)                        cost  = Math.max(0.5, cost * 0.5);
+
+  // Context modifier (e.g. weather)
+  if (ctx?.weather === 'mud' && unitType.wheeled) cost *= 1.5;
 
   return cost;
-};
+}
 ```
 
-### Edge-level passability override
+### Pathfinder API sketch
 
 ```js
-// A wall edge that infantry can pass through via a gate
-layer.setEdge(5, 3, 2, { impassable: true, crossableBy: ['infantry'] });
-
-layer.edgeCrossableFn = (row, col, edge, ownProps, nbrProps, unitType) => {
-  const ep = { ...nbrProps, ...ownProps };
-  if (!ep.impassable) return true;
-  return ep.crossableBy?.includes(unitType.name) ?? false;
-};
+// findPath(layer, startRow, startCol, endRow, endCol, costFn, unitType, options)
+// → [ {row, col}, … ] | null
+//
+// options.context — passed through to costFn as the last argument
+// options.skipStartPassability — if true, costFn not called for the origin hex (unit
+//   may already be on difficult terrain)
 ```
 
-### Pathfinder start/end on impassable hexes
-
-A unit that is already on an impassable hex (e.g. placed there by the scenario editor) should
-still be able to find a path out. The pathfinder must skip the `hexPassable` check for the
-origin hex, and optionally for the destination (the unit is trying to reach it regardless).
+The pathfinder calls `layer.getHex` and `layer.getEdge` directly; it does not call any methods
+on the layer that embed cost logic.
 
 ---
 
@@ -401,34 +388,30 @@ forEachHex(fn) {
 
 ---
 
-## Open Questions
+## Decisions
 
-1. **Edge deduplication strategy**: Option A (per-frame Set) vs Option B (ownership rule).
-   Option A is simpler to reason about; Option B avoids a heap allocation per frame. Given
-   that typical edge counts are low (borders, rivers etc. on a minority of hex edges), the Set
-   is unlikely to be a bottleneck. **Recommend Option A** unless profiling says otherwise.
+1. **Edge merge semantics** — `getEdge` merges both sides; queried hex's record takes
+   precedence on key conflicts. **Accepted.**
 
-2. **`drawHexFn` in complete mode with null props**: Should the function be called for every
-   hex including those with `null` records, or only when a record exists? Controlled by
-   `drawUnset` option. Default `false` seems right — if every hex needs drawing the user can
-   write a custom layer instead.
+2. **Cost/passability semantics** — no reserved property names on the layer (`impassable`,
+   `moveCost`, `crossableBy`, etc. are gone). All such logic lives in the application-supplied
+   `costFn` passed to the pathfinder. **Accepted.**
 
-3. **Edge geometry caching**: Midpoints and normals are the same for every hex (same layout).
-   Precompute six `{ dmx, dmy, nx, ny }` values in `onAttach`. This is straightforward and
-   should be done from the start, not as a later optimisation.
+3. **Edge deduplication** — Option A (per-frame `Set`). **Accepted.**
 
-4. **`moveCost` when no records exist**: Default should return `1` (passable, unit cost), not
-   `0` or `Infinity`. A hex with no terrain data is assumed traversable with normal cost.
+4. **`moveCost` default in pathfinder** — `costFn` should return `1` for hexes with no data
+   (traversable at normal cost). Application responsibility. **Accepted.**
 
-5. **Pathfinder location**: Keep as a separate module (`src/hex-movement.js`) rather than
-   embedding in `HexDetailsLayer`. The layer is data + rendering; the pathfinder is a consumer.
-   This keeps the layer usable without loading the pathfinder.
+5. **Pathfinder location** — separate module (`src/hex-movement.js`). **Accepted.**
 
-6. **Multiple layers**: Could there be more than one `HexDetailsLayer` on a single map (e.g.
-   one for terrain, one for weather effects)? The API should not preclude this, but the
-   pathfinder will need to know which layer(s) to query. Simplest: pathfinder takes a single
-   layer; user merges layers at the application level if needed.
+6. **Multiple layers** — API does not preclude it. Pathfinder takes a single layer; application
+   merges data at the `costFn` level if multiple layers are needed. **Accepted.**
 
-7. **Off-map neighbours**: `_neighbor` returns `null` for edges that touch the grid boundary.
-   Edge records on boundary hexes pointing outward are stored but `getEdge` will only return
-   the own record (no neighbour to merge from). This is correct behaviour.
+7. **Off-map neighbours** — `_neighbor` returns `null`; `getEdge` returns only the own record
+   for boundary edges. **Correct behaviour; accepted.**
+
+8. **`drawUnset` option** — `drawHexFn` called for hexes with no explicit props only when
+   `drawUnset: true` (default `false`). **Accepted.**
+
+9. **Edge geometry caching** — precompute six `{ dmx, dmy, nx, ny }` values in `onAttach`.
+   **Do from the start.**
