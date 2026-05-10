@@ -7,6 +7,7 @@ A plain HTML + JavaScript framework for viewing hex-based board game maps. No bu
 ```
 index.html              demo / reference implementation
 demo-perf.html          performance demo (1000x1000 grid, 24000 counters, minimap)
+demo-details.html       terrain and edge properties demo (HexDetailsLayer)
 src/
   hexviewer.js          core framework (exposes window.HexViewer)
   counter-layer.js      counter layer module (exposes window.HexViewer.Counter / CounterLayer)
@@ -165,6 +166,97 @@ layer.fillStyle = '#334455'
 
 Automatically hidden when the rendered dot would be sub-pixel.
 
+### HexDetailsLayer
+
+Per-hex and per-hex-edge property storage with optional custom rendering. Intended as the data layer for terrain, features, and edge modifiers (rivers, roads, walls, etc.).
+
+```js
+new HexViewer.HexDetailsLayer(name, options)
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `mode` | string | `'sparse'` | `'sparse'` (Map-backed) or `'complete'` (2-D array) |
+| `rows`, `cols` | number | — | Required for `'complete'` mode |
+| `drawHexFn` | function | `null` | `(ctx, hex, props, hexMap) => void` — render into each hex |
+| `drawEdgeFn` | function | `null` | `(ctx, edgeGeom, props, hexMap) => void` — render each edge |
+| `drawUnset` | boolean | `false` | In complete mode, call `drawHexFn` for hexes with no explicit props |
+| `minScreenSize` | number | `4` | Skip draw functions when `size × zoom` is below this value |
+| `visible` | boolean | `true` | Initial visibility |
+
+`'sparse'` mode stores only hexes/edges that have been written. `'complete'` mode pre-allocates a `rows × cols` grid, which is faster to read back but uses more memory.
+
+#### Hex operations
+
+```js
+layer.setHex(row, col, props)   // merge props into hex record (Object.assign semantics)
+layer.getHex(row, col)          // → props object or null
+layer.clearHex(row, col)        // delete hex record
+layer.hasHex(row, col)          // → bool
+layer.forEachHex(fn)            // fn(row, col, props) for every stored hex record
+```
+
+#### Edge operations
+
+Each physical edge is shared by two adjacent hexes. Edge `e` of hex `(r, c)` is the same physical boundary as edge `(e + 3) % 6` of its neighbour in direction `e`. Properties can be set from either side; `getEdge` merges both records (own record takes precedence on key conflicts).
+
+```js
+layer.setEdge(row, col, edge, props)  // merge props into this hex's edge record
+layer.getEdge(row, col, edge)         // → merged record (own + neighbour), or null
+layer.getEdgeOwn(row, col, edge)      // → only this hex's record, no neighbour merge
+layer.clearEdge(row, col, edge)       // delete this hex's edge record
+layer.hasEdge(row, col, edge)         // → bool; true if either side has a record
+layer.forEachEdge(fn)                 // fn(row, col, edge, props) for every stored edge record
+```
+
+Edge indices 0–5 follow cube-direction order (E, NE, NW, W, SW, SE for pointy-top).
+
+#### Serialisation
+
+```js
+layer.toJSON()                          // → { hexes: [...], edges: [...] }
+layer.fromJSON(data)                    // merge into existing data
+layer.fromJSON(data, { replace: true }) // clear first, then load
+```
+
+#### drawHexFn
+
+Called for each visible hex that has a stored property record (or every visible hex in complete mode with `drawUnset: true`). The context is already in world space.
+
+```js
+drawHexFn(ctx, hex, props, hexMap)
+// hex      — { row, col, q, r, cx, cy }
+// props    — the hex's property object (null in complete+drawUnset mode)
+// hexMap   — HexMap instance
+```
+
+#### drawEdgeFn
+
+Called for each visible edge that has at least one property record. Each edge is drawn at most once per frame (shared edges are deduplicated via a per-frame Set). Pre-computed geometry is passed so no trig is needed inside the function.
+
+```js
+drawEdgeFn(ctx, edgeGeom, props, hexMap)
+// edgeGeom — { row, col, edge, cx, cy, x0, y0, x1, y1, mx, my, nx, ny, nbrRow, nbrCol }
+//   cx, cy     — world-space centre of the canonical hex
+//   x0/y0, x1/y1 — world-space endpoints of the edge
+//   mx, my     — edge midpoint
+//   nx, ny     — outward unit normal (points away from hex centre)
+//   nbrRow/nbrCol — neighbour coordinates; -1 if off-grid
+// props    — merged edge record (own + neighbour, own takes precedence)
+```
+
+**Line width guidance.** Use world-space line widths (no division by zoom) so features scale proportionally with the hex at all zoom levels — matching the behaviour of hex decorations. Apply a minimum floor to keep lines visible at extreme zoom-out or on the minimap:
+
+```js
+function drawEdgeFn(ctx, geom, props, hexMap) {
+    const zoom = hexMap._viewport.zoom;
+    ctx.lineWidth = Math.max(props.width, 0.5 / zoom);  // world-space + 0.5px floor
+    // ...
+}
+```
+
+---
+
 ### DomLayer
 
 Base class for layers that live in the DOM overlay rather than the canvas. The overlay is a `pointer-events:none` div that covers the canvas exactly and is unaffected by pan/zoom/rotation.
@@ -241,6 +333,20 @@ new HexViewer.MinimapLayer(options)
 | `corner` | string | `'bottom-right'` | `'top-left'`, `'top-right'`, `'bottom-left'`, or `'bottom-right'` |
 
 The viewport indicator is drawn as a correctly rotated quadrilateral when the map is rotated. Clicking or dragging the minimap pans the viewport to the corresponding world position.
+
+#### Rendering map content
+
+By default the minimap shows a flat background. Call `redraw` to render one or more layers into an off-screen canvas that is then composited as the minimap background each frame:
+
+```js
+const minimap = new HexViewer.MinimapLayer({ width: 280, height: 200 });
+map.addLayer(minimap);
+
+// After map data is populated:
+minimap.redraw(map, [terrainLayer, edgesLayer]);
+```
+
+The off-screen canvas is static — call `redraw` again whenever the underlying data changes. Each layer is rendered at full-map scale (all hexes, no viewport culling) with line widths automatically adjusted for the minimap scale.
 
 ---
 
