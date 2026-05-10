@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HexDetailsLayer Demo</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  width: 100%; height: 100%;
+  overflow: hidden;
+  background: #111a24;
+  font-family: monospace;
+  color: #c8d8e8;
+}
+
+#app { display: flex; flex-direction: column; width: 100%; height: 100%; }
+
+#toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  background: #162030;
+  border-bottom: 1px solid #253545;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.title { color: #6ab0d8; font-weight: bold; letter-spacing: .05em; white-space: nowrap; }
+
+.sep { width: 1px; height: 18px; background: #2d4050; flex-shrink: 0; }
+
+.group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+label { display: flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; white-space: nowrap; }
+
+button {
+  background: #0e1c28;
+  color: #c8d8e8;
+  border: 1px solid #2d4050;
+  padding: 3px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: monospace;
+  font-size: 13px;
+  white-space: nowrap;
+}
+button:hover { background: #1a2d40; border-color: #4a6a88; }
+
+input[type=range] {
+  width: 80px;
+  cursor: pointer;
+  vertical-align: middle;
+  accent-color: #4a8ab8;
+}
+
+.scale-val {
+  min-width: 2.5em;
+  display: inline-block;
+  color: #6ab0d8;
+  font-size: 12px;
+}
+
+#status {
+  margin-left: auto;
+  color: #4a6a88;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+#canvas-wrap { flex: 1; overflow: hidden; position: relative; }
+
+#map-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: grab;
+  touch-action: none;
+}
+#map-canvas:active { cursor: grabbing; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="toolbar">
+    <span class="title">HexDetailsLayer</span>
+
+    <div class="sep"></div>
+
+    <div class="group">
+      <button id="btn-regen">&#x21BA; New Map</button>
+    </div>
+
+    <div class="sep"></div>
+
+    <div class="group">
+      <label><input type="checkbox" id="chk-terrain" checked> Terrain</label>
+      <label><input type="checkbox" id="chk-edges"   checked> Edges</label>
+      <label><input type="checkbox" id="chk-outline" checked> Outlines</label>
+      <label><input type="checkbox" id="chk-labels">          Labels</label>
+    </div>
+
+    <div class="sep"></div>
+
+    <div class="group">
+      <label>Min&nbsp;px
+        <input type="range" id="sld-min" min="0" max="40" step="1" value="4">
+        <span class="scale-val" id="val-min">4</span>
+      </label>
+    </div>
+
+    <div class="sep"></div>
+
+    <button id="btn-fit">Fit</button>
+
+    <span id="status">hover a hex</span>
+  </div>
+
+  <div id="canvas-wrap">
+    <canvas id="map-canvas"></canvas>
+  </div>
+</div>
+
+<script src="src/hexviewer.js"></script>
+<script>
+(function () {
+'use strict';
+
+const { HexMap, HexDetailsLayer, PanelLayer, Geometry, POINTY_TOP, OFFSET_ODD } = window.HexViewer;
+
+const ROWS = 20, COLS = 30;
+
+// ── Terrain types ─────────────────────────────────────────────────────────────
+
+const TERRAIN = {
+    plain:    { fill: '#b4c870', dark: '#88a040', name: 'Plain'    },
+    forest:   { fill: '#2c5e26', dark: '#1a3814', name: 'Forest'   },
+    mountain: { fill: '#7a7062', dark: '#524c42', name: 'Mountain' },
+    water:    { fill: '#3a7aaa', dark: '#285e88', name: 'Water'    },
+    desert:   { fill: '#d4b464', dark: '#aa8c3c', name: 'Desert'   },
+    swamp:    { fill: '#4e6230', dark: '#34401e', name: 'Swamp'    },
+};
+
+// ── Edge types ────────────────────────────────────────────────────────────────
+
+const EDGE = {
+    river: { color: '#44aaee', width: 3.5, dash: [],     name: 'River' },
+    road:  { color: '#c09050', width: 2.0, dash: [7, 4], name: 'Road'  },
+    wall:  { color: '#667088', width: 5.0, dash: [],     name: 'Wall'  },
+    cliff: { color: '#cc6644', width: 3.0, dash: [],     name: 'Cliff' },
+};
+
+// ── drawHexFn ─────────────────────────────────────────────────────────────────
+// Fills each hex with a terrain colour and draws a simple decoration.
+
+function drawHexFn(ctx, hex, props, hexMap) {
+    const terrain = props?.terrain ?? 'plain';
+    const def     = TERRAIN[terrain] ?? TERRAIN.plain;
+    const co      = hexMap.cornerOffsets;
+    const s       = hexMap._layout.size;
+    const { cx, cy } = hex;
+
+    // Terrain fill
+    ctx.beginPath();
+    ctx.moveTo(cx + co[0].dx, cy + co[0].dy);
+    for (let i = 1; i < 6; i++) ctx.lineTo(cx + co[i].dx, cy + co[i].dy);
+    ctx.closePath();
+    ctx.fillStyle = def.fill;
+    ctx.fill();
+
+    // Per-terrain decoration clipped to the hex polygon
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(cx + co[0].dx, cy + co[0].dy);
+    for (let i = 1; i < 6; i++) ctx.lineTo(cx + co[i].dx, cy + co[i].dy);
+    ctx.closePath();
+    ctx.clip();
+
+    switch (terrain) {
+
+        case 'forest': {
+            // Three small tree triangles
+            ctx.fillStyle = def.dark;
+            const pos = [[-s*0.22, -s*0.10], [s*0.22, -s*0.10], [0, s*0.20]];
+            for (const [tx, ty] of pos) {
+                const r = s * 0.19;
+                ctx.beginPath();
+                ctx.moveTo(cx + tx,       cy + ty - r);
+                ctx.lineTo(cx + tx - r,   cy + ty + r * 0.65);
+                ctx.lineTo(cx + tx + r,   cy + ty + r * 0.65);
+                ctx.closePath();
+                ctx.fill();
+            }
+            break;
+        }
+
+        case 'mountain': {
+            // Dark peak with snow cap
+            ctx.fillStyle = def.dark;
+            ctx.beginPath();
+            ctx.moveTo(cx,         cy - s * 0.52);
+            ctx.lineTo(cx - s*0.5, cy + s * 0.28);
+            ctx.lineTo(cx + s*0.5, cy + s * 0.28);
+            ctx.closePath();
+            ctx.fill();
+            ctx.fillStyle = '#ddeef8';
+            ctx.beginPath();
+            ctx.moveTo(cx,          cy - s * 0.52);
+            ctx.lineTo(cx - s*0.18, cy - s * 0.22);
+            ctx.lineTo(cx + s*0.18, cy - s * 0.22);
+            ctx.closePath();
+            ctx.fill();
+            break;
+        }
+
+        case 'water': {
+            // Two wave arcs
+            ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+            ctx.lineWidth   = s * 0.06;
+            ctx.lineCap     = 'round';
+            for (let w = -1; w <= 1; w += 2) {
+                ctx.beginPath();
+                ctx.arc(cx + w * s * 0.20, cy, s * 0.15, Math.PI, 0, false);
+                ctx.stroke();
+            }
+            break;
+        }
+
+        case 'desert': {
+            // Seven sand-grain dots in a ring
+            ctx.fillStyle = def.dark;
+            for (let i = 0; i < 7; i++) {
+                const a = i * Math.PI * 2 / 7;
+                ctx.beginPath();
+                ctx.arc(cx + Math.cos(a)*s*0.28, cy + Math.sin(a)*s*0.28, s*0.048, 0, Math.PI*2);
+                ctx.fill();
+            }
+            break;
+        }
+
+        case 'swamp': {
+            // Three murky ellipses
+            ctx.fillStyle = def.dark;
+            for (const [tx, ty] of [[0, -s*0.20], [-s*0.22, s*0.10], [s*0.22, s*0.10]]) {
+                ctx.beginPath();
+                ctx.ellipse(cx + tx, cy + ty, s*0.13, s*0.07, 0.5, 0, Math.PI*2);
+                ctx.fill();
+            }
+            break;
+        }
+
+        // plain: fill colour is enough
+    }
+
+    ctx.restore();
+}
+
+// ── drawEdgeFn ────────────────────────────────────────────────────────────────
+// Draws a styled line along the shared hex edge.
+
+function drawEdgeFn(ctx, geom, props, hexMap) {
+    const def = EDGE[props?.type];
+    if (!def) return;
+
+    const zoom = hexMap._viewport.zoom;
+
+    ctx.save();
+    ctx.strokeStyle = def.color;
+    ctx.lineWidth   = def.width / zoom;
+    ctx.lineCap     = 'round';
+    if (def.dash.length) ctx.setLineDash(def.dash.map(d => d / zoom));
+
+    ctx.beginPath();
+    ctx.moveTo(geom.x0, geom.y0);
+    ctx.lineTo(geom.x1, geom.y1);
+    ctx.stroke();
+
+    if (def.dash.length) ctx.setLineDash([]);
+    ctx.restore();
+}
+
+// ── Random map generation ─────────────────────────────────────────────────────
+
+function buildTerrainGrid(hexMap) {
+    const { orientation, parity } = hexMap._layout;
+    const grid = Array.from({ length: ROWS }, () => new Array(COLS).fill('plain'));
+
+    function inBounds(r, c) { return r >= 0 && r < ROWS && c >= 0 && c < COLS; }
+
+    function neighbors(r, c) {
+        return Geometry.offsetNeighbors(r, c, orientation, parity).filter(n => inBounds(n.row, n.col));
+    }
+
+    // Blob growth: pick random seeds, expand into plain hexes with decreasing probability
+    function growBlob(terrain, numSeeds, maxSize, spreadProb) {
+        const frontier = [];
+        for (let i = 0; i < numSeeds; i++) {
+            const r = (Math.random() * ROWS) | 0;
+            const c = (Math.random() * COLS) | 0;
+            if (grid[r][c] === 'plain') {
+                grid[r][c] = terrain;
+                frontier.push({ row: r, col: c });
+            }
+        }
+        let fi = 0, count = frontier.length;
+        while (fi < frontier.length && count < maxSize) {
+            for (const n of neighbors(frontier[fi].row, frontier[fi].col)) {
+                if (grid[n.row][n.col] === 'plain' && Math.random() < spreadProb) {
+                    grid[n.row][n.col] = terrain;
+                    frontier.push(n);
+                    if (++count >= maxSize) break;
+                }
+            }
+            fi++;
+        }
+    }
+
+    const T = ROWS * COLS;
+    growBlob('water',    3, (T * 0.17) | 0, 0.68);
+    growBlob('forest',   4, (T * 0.20) | 0, 0.58);
+    growBlob('mountain', 3, (T * 0.10) | 0, 0.52);
+    growBlob('desert',   2, (T * 0.08) | 0, 0.62);
+    growBlob('swamp',    2, (T * 0.05) | 0, 0.48);
+
+    return grid;
+}
+
+function placeEdges(layer, grid, hexMap) {
+    const { orientation, parity } = hexMap._layout;
+    const lowland = new Set(['plain', 'forest', 'desert', 'swamp']);
+
+    for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+            const nbrs = Geometry.offsetNeighbors(r, c, orientation, parity);
+
+            for (let e = 0; e < 6; e++) {
+                const n = nbrs[e];
+                if (n.row < 0 || n.row >= ROWS || n.col < 0 || n.col >= COLS) continue;
+
+                // Process each physical edge once (from the lower-indexed hex side)
+                if (n.row < r || (n.row === r && n.col <= c)) continue;
+
+                const tA = grid[r][c], tB = grid[n.row][n.col];
+
+                // River: marks the boundary between water and land
+                if ((tA === 'water') !== (tB === 'water')) {
+                    if (Math.random() < 0.65) { layer.setEdge(r, c, e, { type: 'river' }); continue; }
+                }
+
+                // Cliff: sharp drop from mountain to lowland
+                if ((tA === 'mountain' && lowland.has(tB)) || (tB === 'mountain' && lowland.has(tA))) {
+                    if (Math.random() < 0.38) { layer.setEdge(r, c, e, { type: 'cliff' }); continue; }
+                }
+
+                // Wall: fortification along mountain ridges
+                if (tA === 'mountain' && tB === 'mountain') {
+                    if (Math.random() < 0.18) { layer.setEdge(r, c, e, { type: 'wall' }); continue; }
+                }
+
+                // Road: sparse tracks through plain and forest
+                if ((tA === 'plain' || tA === 'forest') && (tB === 'plain' || tB === 'forest')) {
+                    if (Math.random() < 0.045) { layer.setEdge(r, c, e, { type: 'road' }); }
+                }
+            }
+        }
+    }
+}
+
+// ── Panels ────────────────────────────────────────────────────────────────────
+
+function makeLegendPanel() {
+    const panel = new PanelLayer('legend', { position: { bottom: 10, left: 10 } });
+
+    let html = '<div style="color:#6ab0d8;font-weight:bold;margin-bottom:5px;font-size:11px;letter-spacing:.06em">TERRAIN</div>';
+    for (const def of Object.values(TERRAIN)) {
+        html +=
+            `<div style="display:flex;align-items:center;gap:7px;margin-bottom:3px;font-size:12px">` +
+            `<span style="width:13px;height:13px;background:${def.fill};flex-shrink:0;` +
+            `border:1px solid rgba(255,255,255,0.15);display:inline-block"></span>` +
+            def.name + `</div>`;
+    }
+
+    html += '<div style="color:#6ab0d8;font-weight:bold;margin:8px 0 5px;font-size:11px;letter-spacing:.06em">EDGES</div>';
+    for (const def of Object.values(EDGE)) {
+        html +=
+            `<div style="display:flex;align-items:center;gap:7px;margin-bottom:3px;font-size:12px">` +
+            `<span style="width:13px;height:0;border-top:3px solid ${def.color};` +
+            `flex-shrink:0;display:inline-block"></span>` +
+            def.name + `</div>`;
+    }
+
+    panel.html = html;
+    panel.setSize({ width: 108 });
+    return panel;
+}
+
+// ── Map build + controls ──────────────────────────────────────────────────────
+
+let map, terrainLayer, edgesLayer, infoPanel;
+
+function buildMap() {
+    const canvas  = document.getElementById('map-canvas');
+    const minSize = parseInt(document.getElementById('sld-min').value, 10);
+
+    if (map) map.destroy();
+
+    // Two separate HexDetailsLayer instances: one for hex terrain fills,
+    // one for edge features. Independent visibility toggles.
+    terrainLayer = new HexDetailsLayer('terrain', {
+        mode:          'complete',
+        rows:          ROWS,
+        cols:          COLS,
+        drawHexFn,
+        drawUnset:     true,   // draw every hex, even with null props (shows plain base)
+        minScreenSize: minSize,
+    });
+
+    edgesLayer = new HexDetailsLayer('edges', {
+        // sparse (default): only hexes with edge records need storage
+        drawEdgeFn,
+        minScreenSize: minSize,
+    });
+
+    infoPanel = new PanelLayer('info', { position: { top: 10, right: 10 } });
+    infoPanel.setSize({ width: 148 });
+    infoPanel.html = '<span style="color:#4a6a88;font-size:12px">hover a hex</span>';
+
+    map = new HexMap(canvas, {
+        rows: ROWS, cols: COLS, hexSize: 40,
+        orientation: POINTY_TOP, offsetParity: OFFSET_ODD,
+        background: '#0a1420',
+    });
+
+    // Layer order bottom → top:
+    //   terrainLayer, hex-outline, hex-label, center-dot, edgesLayer, legend, info
+    map.addLayer(terrainLayer, 0);  // below the built-in outline/label/dot layers
+    map.addLayer(edgesLayer);       // above outlines so edge lines are unobscured
+    map.addLayer(makeLegendPanel());
+    map.addLayer(infoPanel);
+
+    map.setLayerVisible('terrain',     document.getElementById('chk-terrain').checked);
+    map.setLayerVisible('edges',       document.getElementById('chk-edges').checked);
+    map.setLayerVisible('hex-outline', document.getElementById('chk-outline').checked);
+    map.setLayerVisible('hex-label',   document.getElementById('chk-labels').checked);
+    map.setLayerVisible('center-dot',  false);
+
+    // Generate terrain and edge data
+    const grid = buildTerrainGrid(map);
+
+    for (let r = 0; r < ROWS; r++)
+        for (let c = 0; c < COLS; c++)
+            terrainLayer.setHex(r, c, { terrain: grid[r][c] });
+
+    placeEdges(edgesLayer, grid, map);
+
+    // Hover: update status bar and info panel
+    map.on('hexHover', ({ row, col }) => {
+        const hProps  = terrainLayer.getHex(row, col);
+        const tDef    = TERRAIN[hProps?.terrain] ?? TERRAIN.plain;
+        const edgeParts = [];
+
+        for (let e = 0; e < 6; e++) {
+            const ep = edgesLayer.getEdge(row, col, e);
+            if (ep?.type) edgeParts.push(`e${e}:${EDGE[ep.type]?.name ?? ep.type}`);
+        }
+
+        document.getElementById('status').textContent =
+            `(${String(row).padStart(2,'0')},${String(col).padStart(2,'0')})  ${tDef.name}` +
+            (edgeParts.length ? `  [${edgeParts.join('  ')}]` : '');
+
+        infoPanel.html =
+            `<div style="color:#6ab0d8;font-weight:bold;margin-bottom:5px">` +
+            `(${String(row).padStart(2,'0')},${String(col).padStart(2,'0')})</div>` +
+            `<div style="display:flex;align-items:center;gap:6px;margin-bottom:${edgeParts.length?6:0}px">` +
+            `<span style="width:12px;height:12px;background:${tDef.fill};display:inline-block;` +
+            `border:1px solid rgba(255,255,255,0.15)"></span>` +
+            `<span>${tDef.name}</span></div>` +
+            (edgeParts.length
+                ? `<div style="color:#88aabb;font-size:11px;margin-top:2px">` +
+                  edgeParts.map(ep => `· ${ep}`).join('<br>') + `</div>`
+                : '');
+    });
+
+    map.fitToView();
+}
+
+// Controls
+document.getElementById('btn-regen').addEventListener('click', buildMap);
+document.getElementById('btn-fit').addEventListener('click',   () => map && map.fitToView());
+
+document.getElementById('chk-terrain').addEventListener('change', e => map.setLayerVisible('terrain',     e.target.checked));
+document.getElementById('chk-edges'  ).addEventListener('change', e => map.setLayerVisible('edges',       e.target.checked));
+document.getElementById('chk-outline').addEventListener('change', e => map.setLayerVisible('hex-outline', e.target.checked));
+document.getElementById('chk-labels' ).addEventListener('change', e => map.setLayerVisible('hex-label',   e.target.checked));
+
+document.getElementById('sld-min').addEventListener('input', e => {
+    const v = parseInt(e.target.value, 10);
+    document.getElementById('val-min').textContent = v;
+    if (terrainLayer) terrainLayer.minScreenSize = v;
+    if (edgesLayer)   edgesLayer.minScreenSize   = v;
+    if (map) map.refresh();
+});
+
+buildMap();
+
+})();
+</script>
+</body>
+</html>
