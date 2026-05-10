@@ -228,13 +228,18 @@ function costFn(fromR, fromC, toR, toC, edge, hexProps, _edgeProps, unitType) {
     if (unitType.naval) return terrain === 'water' ? 1 : Infinity;
     if (terrain === 'water') return Infinity;
 
-    const costs = TERRAIN_MOVE[terrain];
-    let cost = costs ? (unitType.wheeled ? costs[1] : costs[0]) : 1;
-    if (!isFinite(cost)) return Infinity;
-
-    // Edge data lives in edgesLayer, not in terrainLayer (which the pathfinder queries)
+    // Query edge before the Infinity check so roads can override impassable terrain.
     const ep = edgesLayer ? edgesLayer.getEdge(fromR, fromC, edge) : null;
     if (ep?.type === 'cliff' || ep?.type === 'wall') return Infinity;
+
+    const costs = TERRAIN_MOVE[terrain];
+    let cost = costs ? (unitType.wheeled ? costs[1] : costs[0]) : 1;
+
+    // A road makes the hex passable even for units that can't otherwise enter;
+    // use the infantry base cost as the starting point before road reduction.
+    if (!isFinite(cost) && ep?.type === 'road') cost = costs ? costs[0] : 3;
+    if (!isFinite(cost)) return Infinity;
+
     if (ep?.type === 'river') cost += unitType.wheeled ? 2 : 1;
     if (ep?.type === 'road')  cost  = Math.max(0.5, cost * 0.5);
 
