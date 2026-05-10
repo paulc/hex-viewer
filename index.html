@@ -86,6 +86,17 @@ input[type=range] {
   accent-color: #4a8ab8;
 }
 
+input[type=number] {
+  width: 52px;
+  background: #0e1c28;
+  color: #c8d8e8;
+  border: 1px solid #2d4050;
+  padding: 2px 5px;
+  border-radius: 3px;
+  font-family: monospace;
+  font-size: 12px;
+}
+
 .scale-val {
   min-width: 2.8em;
   display: inline-block;
@@ -146,6 +157,8 @@ input[type=range] {
     <!-- Layer toggles -->
     <div class="group">
       <label><input type="checkbox" id="chk-outline" checked> Outlines</label>
+      <label>Min&nbsp;px <input type="range" id="sld-outline-min" min="0" max="30" step="1" value="8">
+        <span class="scale-val" id="val-outline-min">8</span></label>
       <label><input type="checkbox" id="chk-label"   checked> Numbers</label>
       <label><input type="checkbox" id="chk-dot"     checked> Dots</label>
       <label><input type="checkbox" id="chk-color">          Colors</label>
@@ -258,6 +271,17 @@ input[type=range] {
 
     <div class="sep"></div>
 
+    <!-- Grid size + coordinate start -->
+    <div class="group">
+      <label>Rows <input type="number" id="inp-rows" value="20" min="1" max="500"></label>
+      <label>Cols <input type="number" id="inp-cols" value="30" min="1" max="500"></label>
+      <label>Start&nbsp;Row <input type="number" id="inp-start-row" value="0"></label>
+      <label>Start&nbsp;Col <input type="number" id="inp-start-col" value="0"></label>
+      <button id="btn-apply-grid">Apply</button>
+    </div>
+
+    <div class="sep"></div>
+
     <button id="btn-fit">Fit</button>
 
     <span id="status">hover over a hex</span>
@@ -302,8 +326,7 @@ input[type=range] {
     }
   }
 
-  const ROWS = 20, COLS = 30;
-  const colorLayer   = new ColorLayer(ROWS, COLS);
+  let colorLayer     = null;
   const counterLayer = new CounterLayer();
 
   // Overlay panel — shows hex info, stays fixed over the map
@@ -569,13 +592,20 @@ input[type=range] {
     const originCorner = document.getElementById('sel-origin').value;
     const offsetParity = document.getElementById('sel-parity').value === 'even' ? OFFSET_EVEN : OFFSET_ODD;
     const rotationStep = parseInt(document.getElementById('sel-rotstep').value, 10);
+    const rows     = Math.max(1, parseInt(document.getElementById('inp-rows').value, 10) || 20);
+    const cols     = Math.max(1, parseInt(document.getElementById('inp-cols').value, 10) || 30);
+    const startRow = parseInt(document.getElementById('inp-start-row').value, 10) || 0;
+    const startCol = parseInt(document.getElementById('inp-start-col').value, 10) || 0;
+
+    colorLayer = new ColorLayer(rows, cols);
 
     const savedViewport = map ? map.getViewport() : null;
     if (map) map.destroy();
 
     map = new HexMap(canvas, {
-      rows: ROWS, cols: COLS, hexSize: 40,
+      rows, cols, hexSize: 40,
       orientation, originCorner, offsetParity, rotationStep,
+      startRow, startCol,
     });
 
     // Layer order bottom-to-top: tile, fill, color, hex-outline, hex-label,
@@ -591,7 +621,7 @@ input[type=range] {
     map.addLayer(infoPanel);
     map.addLayer(selPanel);
 
-    // Restore checkbox visibility
+    // Restore checkbox visibility and layer settings
     map.setLayerVisible('bg-tile',     document.getElementById('chk-img-tile').checked);
     map.setLayerVisible('map-fill',    document.getElementById('chk-img-fill').checked);
     map.setLayerVisible('anchor-icon', document.getElementById('chk-img-anchor').checked);
@@ -600,6 +630,7 @@ input[type=range] {
     map.setLayerVisible('center-dot',  document.getElementById('chk-dot').checked);
     map.setLayerVisible('color',       document.getElementById('chk-color').checked);
     map.setLayerVisible('counters',    document.getElementById('chk-counters').checked);
+    map.getLayer('hex-outline').minScreenSize = parseInt(document.getElementById('sld-outline-min').value, 10);
 
     // Apply current colour picker values
     applyColors();
@@ -639,8 +670,14 @@ input[type=range] {
     map.refresh();
   });
 
-  // -- Layer checkboxes ---------------------------------------------------------
+  // -- Layer checkboxes + outline threshold ------------------------------------
   document.getElementById('chk-outline').addEventListener('change', e => map.setLayerVisible('hex-outline', e.target.checked));
+  document.getElementById('sld-outline-min').addEventListener('input', e => {
+    const v = parseInt(e.target.value, 10);
+    map.getLayer('hex-outline').minScreenSize = v;
+    document.getElementById('val-outline-min').textContent = v;
+    map.refresh();
+  });
   document.getElementById('chk-label').addEventListener('change',   e => map.setLayerVisible('hex-label',   e.target.checked));
   document.getElementById('chk-dot').addEventListener('change',     e => map.setLayerVisible('center-dot',  e.target.checked));
   document.getElementById('chk-color').addEventListener('change',    e => map.setLayerVisible('color',    e.target.checked));
@@ -664,10 +701,15 @@ input[type=range] {
   document.getElementById('col-number').addEventListener('input', () => applyColors());
   document.getElementById('col-dot').addEventListener('input',    () => applyColors());
 
-  // -- Grid selects -------------------------------------------------------------
+  // -- Grid selects + size/origin inputs ----------------------------------------
   document.getElementById('sel-orient').addEventListener('change', buildMap);
   document.getElementById('sel-origin').addEventListener('change', buildMap);
   document.getElementById('sel-parity').addEventListener('change', buildMap);
+  document.getElementById('btn-apply-grid').addEventListener('click', buildMap);
+  // Also rebuild on Enter inside any of the four number inputs
+  ['inp-rows','inp-cols','inp-start-row','inp-start-col'].forEach(id =>
+    document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') buildMap(); })
+  );
 
   // -- Rotation -----------------------------------------------------------------
   document.getElementById('btn-cw').addEventListener('click', () => {

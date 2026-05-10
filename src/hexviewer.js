@@ -143,20 +143,21 @@ class Layer {
 class HexOutlineLayer extends Layer {
     constructor(options = {}) {
         super('hex-outline', options.visible !== false);
-        this.strokeStyle = options.strokeStyle || '#556677';
-        this.lineWidth   = options.lineWidth   || 1;
+        this.strokeStyle   = options.strokeStyle   || '#556677';
+        this.lineWidth     = options.lineWidth      || 1;
+        this.minScreenSize = options.minScreenSize  ?? 8;
     }
 
     render(ctx, hexMap, visibleHexes) {
+        if (hexMap._layout.size * hexMap._viewport.zoom < this.minScreenSize) return;
         const co = hexMap.cornerOffsets;
         ctx.strokeStyle = this.strokeStyle;
         // Compensate lineWidth for zoom so outlines stay 1 CSS-pixel wide
         ctx.lineWidth = this.lineWidth / hexMap._viewport.zoom;
         ctx.beginPath();
         for (const hex of visibleHexes) {
-            const c = Geometry.hexCorners(hex.cx, hex.cy, co);
-            ctx.moveTo(c[0].x, c[0].y);
-            for (let i = 1; i < 6; i++) ctx.lineTo(c[i].x, c[i].y);
+            ctx.moveTo(hex.cx + co[0].dx, hex.cy + co[0].dy);
+            for (let i = 1; i < 6; i++) ctx.lineTo(hex.cx + co[i].dx, hex.cy + co[i].dy);
             ctx.closePath();
         }
         ctx.stroke();
@@ -509,6 +510,9 @@ class HexMap {
             orientation  = POINTY_TOP,
             offsetParity = OFFSET_ODD,
             originCorner = 'top-left',
+            origin       = { x: 0, y: 0 },
+            startRow     = 0,
+            startCol     = 0,
             getHexLabel  = null,
             minZoom      = 0.1,
             maxZoom      = 10,
@@ -518,6 +522,8 @@ class HexMap {
 
         this._rows         = rows;
         this._cols         = cols;
+        this._startRow     = startRow;
+        this._startCol     = startCol;
         this._minZoom      = minZoom;
         this._maxZoom      = maxZoom;
         this._background   = background;
@@ -526,15 +532,16 @@ class HexMap {
         this._layout = {
             orientation,
             size:   hexSize,
-            origin: { x: 0, y: 0 },
+            origin: { x: origin.x ?? 0, y: origin.y ?? 0 },
             parity: offsetParity,
             yFlip:  originCorner === 'bottom-left' ? -1 : 1,
         };
 
         this._cornerOffsets = Geometry.computeCornerOffsets(this._layout);
 
+        const sr = startRow, sc = startCol;
         this._getHexLabel = getHexLabel || ((row, col) =>
-            `${String(row).padStart(2, '0')}${String(col).padStart(2, '0')}`
+            `${String(row + sr).padStart(2, '0')}${String(col + sc).padStart(2, '0')}`
         );
 
         this._viewport = { panX: 0, panY: 0, zoom: 1, angle: 0 };
@@ -870,56 +877,91 @@ class HexMap {
 
     _computeVisibleHexes() {
         const { panX, panY, zoom, angle } = this._viewport;
-        const canvas = this._canvas;
-        const cw = canvas.clientWidth;
-        const ch = canvas.clientHeight;
+        const cw = this._canvas.clientWidth;
+        const ch = this._canvas.clientHeight;
 
-        // Rotate all four canvas corners into world space to get the AABB
-        // of the rotated visible rectangle (conservative but correct for any angle)
+        // AABB of the rotated viewport in world space
         let minWx = Infinity, minWy = Infinity, maxWx = -Infinity, maxWy = -Infinity;
-        for (const [sx, sy] of [[0, 0], [cw, 0], [cw, ch], [0, ch]]) {
+        const cosA = Math.cos(-angle), sinA = Math.sin(-angle);
+        for (let ci = 0; ci < 4; ci++) {
+            const sx = ci === 1 || ci === 2 ? cw : 0;
+            const sy = ci === 2 || ci === 3 ? ch : 0;
             const dx = sx - panX, dy = sy - panY;
-            const wx = (dx * Math.cos(-angle) - dy * Math.sin(-angle)) / zoom;
-            const wy = (dx * Math.sin(-angle) + dy * Math.cos(-angle)) / zoom;
+            const wx = (dx * cosA - dy * sinA) / zoom;
+            const wy = (dx * sinA + dy * cosA) / zoom;
             if (wx < minWx) minWx = wx; if (wx > maxWx) maxWx = wx;
             if (wy < minWy) minWy = wy; if (wy > maxWy) maxWy = wy;
         }
 
-        const margin = this._layout.size * 1.5;
+        const { size, orientation, parity, yFlip } = this._layout;
+        const ox = this._layout.origin.x, oy = this._layout.origin.y;
+        const margin = size * 1.5;
         minWx -= margin; minWy -= margin; maxWx += margin; maxWy += margin;
 
-        // Estimate which rows and cols could be visible so we don't scan the whole grid.
-        // Row/col step sizes are exact for the primary axis; the +2 pad covers stagger.
-        const { size, orientation, yFlip } = this._layout;
         const isPointy = orientation === POINTY_TOP;
-        const rowStep = isPointy ? size * 1.5          : size * Math.sqrt(3);
-        const colStep = isPointy ? size * Math.sqrt(3) : size * 1.5;
+        const rowStep  = isPointy ? size * 1.5 : size * Math.sqrt(3);
+        const colStep  = isPointy ? size * Math.sqrt(3) : size * 1.5;
         const pad = 2;
 
         let r0, r1;
         if (yFlip >= 0) {
-            r0 = Math.floor(minWy / rowStep) - pad;
-            r1 = Math.ceil(maxWy / rowStep)  + pad;
+            r0 = Math.floor((minWy - oy) / rowStep) - pad;
+            r1 = Math.ceil( (maxWy - oy) / rowStep) + pad;
         } else {
-            r0 = Math.floor(-maxWy / rowStep) - pad;
-            r1 = Math.ceil(-minWy / rowStep)  + pad;
+            r0 = Math.floor(-(maxWy - oy) / rowStep) - pad;
+            r1 = Math.ceil( -(minWy - oy) / rowStep) + pad;
         }
         const rowMin = Math.max(0, r0);
         const rowMax = Math.min(this._rows - 1, r1);
-        const colMin = Math.max(0, Math.floor(minWx / colStep) - pad);
-        const colMax = Math.min(this._cols - 1, Math.ceil(maxWx / colStep) + pad);
+        const colMin = Math.max(0, Math.floor((minWx - ox) / colStep) - pad);
+        const colMax = Math.min(this._cols - 1, Math.ceil((maxWx - ox) / colStep) + pad);
 
         const result = [];
-        const layout = this._layout;
-        for (let row = rowMin; row <= rowMax; row++) {
+
+        if (isPointy) {
+            // POINTY_TOP: f = [√3, √3/2, 0, 3/2]
+            // q = col - trunc((row + parity*(row&1)) / 2),  r = row
+            // cx = √3·size·q + √3/2·size·row + ox  →  f0s·col + rowOffset (constant per row)
+            // cy = yFlip·1.5·size·row + oy          (constant per row)
+            const sqrt3  = Math.sqrt(3);
+            const f0s    = sqrt3 * size;
+            const f1s    = sqrt3 * 0.5 * size;
+            const f3s    = 1.5 * size;
+            for (let row = rowMin; row <= rowMax; row++) {
+                const cy = yFlip * f3s * row + oy;
+                if (cy < minWy || cy > maxWy) continue;
+                const halfRow   = Math.trunc((row + parity * (row & 1)) / 2);
+                const rowOffset = f1s * row - f0s * halfRow + ox;
+                for (let col = colMin; col <= colMax; col++) {
+                    const cx = f0s * col + rowOffset;
+                    if (cx >= minWx && cx <= maxWx) {
+                        result.push({ row, col, q: col - halfRow, r: row, cx, cy });
+                    }
+                }
+            }
+        } else {
+            // FLAT_TOP: f = [3/2, 0, √3/2, √3]
+            // q = col,  r = row - trunc((col + parity*(col&1)) / 2)
+            // cx = 1.5·size·col + ox                (constant per col)
+            // cy = yFlip·(√3/2·size·col + √3·size·r) + oy  →  yFlip·f3s·row + colOffset (const per col)
+            const sqrt3  = Math.sqrt(3);
+            const f0s    = 1.5 * size;
+            const f2s    = sqrt3 * 0.5 * size;
+            const f3s    = sqrt3 * size;
             for (let col = colMin; col <= colMax; col++) {
-                const { x, y } = Geometry.offsetToPixel(row, col, layout);
-                if (x >= minWx && x <= maxWx && y >= minWy && y <= maxWy) {
-                    const { q, r } = Geometry.offsetToAxial(row, col, layout.orientation, layout.parity);
-                    result.push({ row, col, q, r, cx: x, cy: y });
+                const cx = f0s * col + ox;
+                if (cx < minWx || cx > maxWx) continue;
+                const halfCol   = Math.trunc((col + parity * (col & 1)) / 2);
+                const colOffset = yFlip * (f2s * col - f3s * halfCol) + oy;
+                for (let row = rowMin; row <= rowMax; row++) {
+                    const cy = yFlip * f3s * row + colOffset;
+                    if (cy >= minWy && cy <= maxWy) {
+                        result.push({ row, col, q: col, r: row - halfCol, cx, cy });
+                    }
                 }
             }
         }
+
         return result;
     }
 }

@@ -60,6 +60,20 @@ button {
 }
 button:hover { background: #1a2d40; border-color: #4a6a88; }
 
+input[type=range] {
+  width: 80px;
+  cursor: pointer;
+  vertical-align: middle;
+  accent-color: #4a8ab8;
+}
+
+.scale-val {
+  min-width: 2.8em;
+  display: inline-block;
+  color: #6ab0d8;
+  font-size: 12px;
+}
+
 #rot-val {
   min-width: 3.8em;
   text-align: center;
@@ -126,6 +140,8 @@ button:hover { background: #1a2d40; border-color: #4a6a88; }
 
     <div class="group">
       <label><input type="checkbox" id="chk-outline" checked> Outlines</label>
+      <label>Min&nbsp;px <input type="range" id="sld-outline-min" min="0" max="30" step="1" value="8">
+        <span class="scale-val" id="val-outline-min">8</span></label>
       <label><input type="checkbox" id="chk-label"> Numbers</label>
       <label><input type="checkbox" id="chk-dot"> Dots</label>
       <label><input type="checkbox" id="chk-color"> Colors</label>
@@ -396,6 +412,12 @@ button:hover { background: #1a2d40; border-color: #4a6a88; }
 
   document.getElementById('chk-outline').addEventListener('change', e =>
     map.setLayerVisible('hex-outline', e.target.checked));
+  document.getElementById('sld-outline-min').addEventListener('input', e => {
+    const v = parseInt(e.target.value, 10);
+    map.getLayer('hex-outline').minScreenSize = v;
+    document.getElementById('val-outline-min').textContent = v;
+    map.refresh();
+  });
   document.getElementById('chk-label').addEventListener('change', e =>
     map.setLayerVisible('hex-label', e.target.checked));
   document.getElementById('chk-dot').addEventListener('change', e =>
