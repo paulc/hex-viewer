@@ -50,6 +50,18 @@ button {
 }
 button:hover { background: #1a2d40; border-color: #4a6a88; }
 
+select, input[type=number] {
+  background: #0e1c28;
+  color: #c8d8e8;
+  border: 1px solid #2d4050;
+  padding: 2px 5px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: monospace;
+  font-size: 13px;
+}
+select:hover, input[type=number]:hover { border-color: #4a6a88; }
+
 input[type=range] {
   width: 80px;
   cursor: pointer;
@@ -129,6 +141,25 @@ input[type=range] {
 
     <div class="sep"></div>
 
+    <div class="group">
+      <span class="title" style="font-size:11px">Path</span>
+      <select id="pf-mode">
+        <option value="shortest">Shortest</option>
+        <option value="reachable">Reachable</option>
+        <option value="path-cost">Path cost</option>
+      </select>
+      <select id="pf-unit">
+        <option value="infantry">Infantry</option>
+        <option value="armor">Armor</option>
+        <option value="ship">Ship</option>
+      </select>
+      <label id="pf-budget-wrap" style="display:none;align-items:center;gap:4px">budget&nbsp;<input type="number" id="pf-budget" value="6" min="0.5" max="50" step="0.5" style="width:44px;text-align:right"></label>
+      <button id="pf-clear">Clear</button>
+      <span id="pf-hint" style="color:#6ab0d8;font-size:11px;white-space:nowrap;min-width:14em">click start hex</span>
+    </div>
+
+    <div class="sep"></div>
+
     <button id="btn-fit">Fit</button>
 
     <span id="status">hover a hex</span>
@@ -140,11 +171,14 @@ input[type=range] {
 </div>
 
 <script src="src/hexviewer.js"></script>
+<script src="src/hex-movement.js"></script>
 <script>
 (function () {
 'use strict';
 
-const { HexMap, HexDetailsLayer, PanelLayer, MinimapLayer, Geometry, POINTY_TOP, OFFSET_ODD } = window.HexViewer;
+const { HexMap, HexDetailsLayer, PanelLayer, MinimapLayer,
+        findPath, reachableHexes, pathCost,
+        Geometry, POINTY_TOP, OFFSET_ODD } = window.HexViewer;
 
 const ROWS = 40, COLS = 60;
 
@@ -167,6 +201,136 @@ const EDGE = {
     wall:  { color: '#667088', width: 5.0, dash: [],     name: 'Wall'  },
     cliff: { color: '#cc6644', width: 3.0, dash: [],     name: 'Cliff' },
 };
+
+// ── Unit types & movement costs ───────────────────────────────────────────────
+
+const UNIT_TYPES = {
+    infantry: { name: 'infantry', wheeled: false, naval: false, label: 'Infantry' },
+    armor:    { name: 'armor',    wheeled: true,  naval: false, label: 'Armor'    },
+    ship:     { name: 'ship',     wheeled: false, naval: true,  label: 'Ship'     },
+};
+
+// Base terrain cost: [infantry, wheeled/armor]; Infinity = impassable
+const TERRAIN_MOVE = {
+    plain:    [1,        1       ],
+    forest:   [2,        3       ],
+    mountain: [3,        Infinity],
+    water:    [Infinity, Infinity],
+    desert:   [2,        2       ],
+    swamp:    [3,        Infinity],
+};
+
+// costFn closed over edgesLayer (hex props come from terrainLayer via pathfinder;
+// edge props are queried directly from edgesLayer since they live in a separate layer).
+function costFn(fromR, fromC, toR, toC, edge, hexProps, _edgeProps, unitType) {
+    const terrain = hexProps?.terrain ?? 'plain';
+
+    if (unitType.naval) return terrain === 'water' ? 1 : Infinity;
+    if (terrain === 'water') return Infinity;
+
+    const costs = TERRAIN_MOVE[terrain];
+    let cost = costs ? (unitType.wheeled ? costs[1] : costs[0]) : 1;
+    if (!isFinite(cost)) return Infinity;
+
+    // Edge data lives in edgesLayer, not in terrainLayer (which the pathfinder queries)
+    const ep = edgesLayer ? edgesLayer.getEdge(fromR, fromC, edge) : null;
+    if (ep?.type === 'cliff' || ep?.type === 'wall') return Infinity;
+    if (ep?.type === 'river') cost += unitType.wheeled ? 2 : 1;
+    if (ep?.type === 'road')  cost  = Math.max(0.5, cost * 0.5);
+
+    return cost;
+}
+
+// ── PathResultLayer ───────────────────────────────────────────────────────────
+
+class PathResultLayer extends HexViewer.Layer {
+    constructor() {
+        super('path-result');
+        this._result = null;
+        this._pins   = [];
+    }
+
+    setPath(steps, cost)              { this._result = { type: 'path',      steps, cost };         this._refresh(); }
+    setReachable(rmap, budget)        { this._result = { type: 'reachable', rmap, budget };         this._refresh(); }
+    setCostPath(steps, cost, blocked) { this._result = { type: 'cost',      steps, cost, blocked }; this._refresh(); }
+    setPins(pins)                     { this._pins   = pins;                                        this._refresh(); }
+    clear()                           { this._result = null; this._pins = [];                       this._refresh(); }
+    _refresh()                        { if (this._hexMap) this._hexMap._scheduleRender(); }
+
+    render(ctx, hexMap, visibleHexes) {
+        if (!this._result && !this._pins.length) return;
+        const co         = hexMap.cornerOffsets;
+        const zoom       = hexMap._viewport.zoom;
+        const s          = hexMap._layout.size;
+
+        const visMap = new Map(visibleHexes.map(h => [`${h.row},${h.col}`, h]));
+
+        function outlineHex(hex) {
+            ctx.beginPath();
+            ctx.moveTo(hex.cx + co[0].dx, hex.cy + co[0].dy);
+            for (let i = 1; i < 6; i++) ctx.lineTo(hex.cx + co[i].dx, hex.cy + co[i].dy);
+            ctx.closePath();
+        }
+
+        // ── Fill pass ────────────────────────────────────────────────────────
+        if (this._result?.type === 'path' || this._result?.type === 'cost') {
+            const { steps, blocked } = this._result;
+            const fill = this._result.type === 'path' ? 'rgba(60,210,100,0.42)' :
+                         blocked ? 'rgba(210,60,60,0.42)' : 'rgba(60,140,220,0.42)';
+            const pathSet = new Set(steps.map(h => `${h.row},${h.col}`));
+            ctx.fillStyle = fill;
+            for (const hex of visibleHexes) {
+                if (pathSet.has(`${hex.row},${hex.col}`)) { outlineHex(hex); ctx.fill(); }
+            }
+        } else if (this._result?.type === 'reachable') {
+            const { rmap, budget } = this._result;
+            for (const hex of visibleHexes) {
+                const entry = rmap.get(`${hex.row},${hex.col}`);
+                if (!entry) continue;
+                const t = budget > 0 ? entry.cost / budget : 0;
+                ctx.fillStyle = `rgba(${40 + (200 * t)|0},${210 - (160 * t)|0},60,0.48)`;
+                outlineHex(hex); ctx.fill();
+            }
+        }
+
+        // ── Cost / step labels (only when hexes are large enough to read) ────
+        if (s * zoom >= 20 && this._result) {
+            ctx.save();
+            ctx.textAlign    = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.font         = `bold ${s * 0.28}px monospace`;
+            ctx.fillStyle    = 'rgba(255,255,255,0.90)';
+
+            if (this._result.type === 'reachable') {
+                for (const [k, entry] of this._result.rmap) {
+                    const hex = visMap.get(k);
+                    if (!hex) continue;
+                    ctx.fillText(Number.isInteger(entry.cost) ? `${entry.cost}` : entry.cost.toFixed(1),
+                                 hex.cx, hex.cy);
+                }
+            } else if (this._result.type === 'path') {
+                this._result.steps.forEach((step, idx) => {
+                    const hex = visMap.get(`${step.row},${step.col}`);
+                    if (hex) ctx.fillText(idx, hex.cx, hex.cy);
+                });
+            }
+            ctx.restore();
+        }
+
+        // ── Pin borders ──────────────────────────────────────────────────────
+        if (this._pins.length) {
+            const pinMap = new Map(this._pins.map(p => [`${p.row},${p.col}`, p.role]));
+            ctx.lineWidth = Math.max(2.5, 2.5 / zoom);
+            for (const hex of visibleHexes) {
+                const role = pinMap.get(`${hex.row},${hex.col}`);
+                if (!role) continue;
+                ctx.strokeStyle = role === 'start' ? '#44ff88' :
+                                  role === 'end'   ? '#ff4444' : '#4499ff';
+                outlineHex(hex); ctx.stroke();
+            }
+        }
+    }
+}
 
 // ── drawHexFn ─────────────────────────────────────────────────────────────────
 
@@ -451,7 +615,8 @@ function makeLegendPanel() {
 
 // ── Map build ─────────────────────────────────────────────────────────────────
 
-let map, terrainLayer, edgesLayer, infoPanel, minimap;
+let map, terrainLayer, edgesLayer, infoPanel, minimap, resultLayer;
+let pfClicks = [];
 
 function buildMap() {
     const canvas  = document.getElementById('map-canvas');
@@ -483,8 +648,11 @@ function buildMap() {
         background: '#0a1420',
     });
 
+    resultLayer = new PathResultLayer();
+
     map.addLayer(terrainLayer, 0);  // below built-in outline/label layers
     map.addLayer(edgesLayer);       // above outlines
+    map.addLayer(resultLayer);      // path highlights above terrain/edges
     map.addLayer(makeLegendPanel());
     map.addLayer(infoPanel);
     map.addLayer(minimap);
@@ -501,6 +669,59 @@ function buildMap() {
             terrainLayer.setHex(r, c, { terrain: grid[r][c] });
     placeEdges(edgesLayer, grid, map);
     minimap.redraw(map, [terrainLayer, edgesLayer]);
+    pfClicks = [];
+
+    map.on('hexClick', ({ row, col, button }) => {
+        if (button !== 0) return;
+        const mode = document.getElementById('pf-mode').value;
+        const unit = UNIT_TYPES[document.getElementById('pf-unit').value];
+
+        if (mode === 'shortest') {
+            pfClicks.push({ row, col });
+            if (pfClicks.length === 1) {
+                resultLayer.clear();
+                resultLayer.setPins([{ row, col, role: 'start' }]);
+                pfHint('click end hex');
+            } else {
+                const [start, end] = pfClicks;
+                const res = findPath(terrainLayer, start.row, start.col, end.row, end.col, costFn, unit);
+                resultLayer.setPins([{ ...start, role: 'start' }, { ...end, role: 'end' }]);
+                if (res) {
+                    resultLayer.setPath(res.path, res.cost);
+                    pfHint(`${res.path.length} hexes · cost ${fmtCost(res.cost)}`);
+                } else {
+                    resultLayer.setCostPath([], 0, true);
+                    pfHint('no path found');
+                }
+                pfClicks = [];
+            }
+        } else if (mode === 'reachable') {
+            pfClicks = [{ row, col }];
+            const budget = parseFloat(document.getElementById('pf-budget').value) || 6;
+            const res    = reachableHexes(terrainLayer, row, col, budget, costFn, unit);
+            resultLayer.setReachable(res, budget);
+            resultLayer.setPins([{ row, col, role: 'start' }]);
+            pfHint(`${res.size} hexes within ${budget} MP`);
+        } else { // path-cost
+            // Skip consecutive duplicate clicks
+            const last = pfClicks[pfClicks.length - 1];
+            if (last && last.row === row && last.col === col) return;
+            pfClicks.push({ row, col });
+            const pins = pfClicks.map((h, i) => ({ ...h, role: i === 0 ? 'start' : 'wp' }));
+            resultLayer.setPins(pins);
+            if (pfClicks.length >= 2) {
+                const res = pathCost(terrainLayer, pfClicks, costFn, unit);
+                resultLayer.setCostPath(pfClicks, res.cost, res.blocked);
+                pfHint(res.blocked
+                    ? `blocked after ${pfClicks.length} hexes`
+                    : `${pfClicks.length} hexes · cost ${fmtCost(res.cost)}`);
+            } else {
+                resultLayer.clear();
+                resultLayer.setPins(pins);
+                pfHint('click to extend path');
+            }
+        }
+    });
 
     map.on('hexHover', ({ row, col }) => {
         const hProps    = terrainLayer.getHex(row, col);
@@ -560,6 +781,26 @@ document.getElementById('sld-min').addEventListener('input', e => {
     if (edgesLayer)   edgesLayer.minScreenSize   = v;
     if (map) map.refresh();
 });
+
+// ── Pathfinding helpers ────────────────────────────────────────────────────────
+
+function pfHint(text) { document.getElementById('pf-hint').textContent = text; }
+function fmtCost(c)   { return Number.isInteger(c) ? `${c}` : c.toFixed(1); }
+
+function pfReset() {
+    if (resultLayer) resultLayer.clear();
+    pfClicks = [];
+    pfHint('click start hex');
+}
+
+document.getElementById('pf-mode').addEventListener('change', () => {
+    const mode = document.getElementById('pf-mode').value;
+    document.getElementById('pf-budget-wrap').style.display = mode === 'reachable' ? 'flex' : 'none';
+    pfReset();
+});
+
+document.getElementById('pf-unit').addEventListener('change', pfReset);
+document.getElementById('pf-clear').addEventListener('click',  pfReset);
 
 buildMap();
 
