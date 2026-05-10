@@ -64,6 +64,13 @@ input[type=range] {
   font-size: 12px;
 }
 
+#rot-val {
+  min-width: 3.8em;
+  text-align: center;
+  color: #6ab0d8;
+  font-size: 13px;
+}
+
 #status {
   margin-left: auto;
   color: #4a6a88;
@@ -114,6 +121,14 @@ input[type=range] {
 
     <div class="sep"></div>
 
+    <div class="group">
+      <button id="btn-ccw">&#x21BA; CCW</button>
+      <span id="rot-val">0°</span>
+      <button id="btn-cw">&#x21BB; CW</button>
+    </div>
+
+    <div class="sep"></div>
+
     <button id="btn-fit">Fit</button>
 
     <span id="status">hover a hex</span>
@@ -148,13 +163,12 @@ const TERRAIN = {
 
 const EDGE = {
     river: { color: '#44aaee', width: 3.5, dash: [],     name: 'River' },
-    road:  { color: '#c09050', width: 2.0, dash: [7, 4], name: 'Road'  },
+    road:  { color: '#c09050', width: 2.5, dash: [],     name: 'Road'  },
     wall:  { color: '#667088', width: 5.0, dash: [],     name: 'Wall'  },
     cliff: { color: '#cc6644', width: 3.0, dash: [],     name: 'Cliff' },
 };
 
 // ── drawHexFn ─────────────────────────────────────────────────────────────────
-// Fills each hex with a terrain colour and draws a simple decoration.
 
 function drawHexFn(ctx, hex, props, hexMap) {
     const terrain = props?.terrain ?? 'plain';
@@ -182,15 +196,13 @@ function drawHexFn(ctx, hex, props, hexMap) {
     switch (terrain) {
 
         case 'forest': {
-            // Three small tree triangles
             ctx.fillStyle = def.dark;
-            const pos = [[-s*0.22, -s*0.10], [s*0.22, -s*0.10], [0, s*0.20]];
-            for (const [tx, ty] of pos) {
+            for (const [tx, ty] of [[-s*0.22, -s*0.10], [s*0.22, -s*0.10], [0, s*0.20]]) {
                 const r = s * 0.19;
                 ctx.beginPath();
-                ctx.moveTo(cx + tx,       cy + ty - r);
-                ctx.lineTo(cx + tx - r,   cy + ty + r * 0.65);
-                ctx.lineTo(cx + tx + r,   cy + ty + r * 0.65);
+                ctx.moveTo(cx + tx,     cy + ty - r);
+                ctx.lineTo(cx + tx - r, cy + ty + r * 0.65);
+                ctx.lineTo(cx + tx + r, cy + ty + r * 0.65);
                 ctx.closePath();
                 ctx.fill();
             }
@@ -198,7 +210,6 @@ function drawHexFn(ctx, hex, props, hexMap) {
         }
 
         case 'mountain': {
-            // Dark peak with snow cap
             ctx.fillStyle = def.dark;
             ctx.beginPath();
             ctx.moveTo(cx,         cy - s * 0.52);
@@ -217,7 +228,6 @@ function drawHexFn(ctx, hex, props, hexMap) {
         }
 
         case 'water': {
-            // Two wave arcs
             ctx.strokeStyle = 'rgba(255,255,255,0.28)';
             ctx.lineWidth   = s * 0.06;
             ctx.lineCap     = 'round';
@@ -230,7 +240,6 @@ function drawHexFn(ctx, hex, props, hexMap) {
         }
 
         case 'desert': {
-            // Seven sand-grain dots in a ring
             ctx.fillStyle = def.dark;
             for (let i = 0; i < 7; i++) {
                 const a = i * Math.PI * 2 / 7;
@@ -242,7 +251,6 @@ function drawHexFn(ctx, hex, props, hexMap) {
         }
 
         case 'swamp': {
-            // Three murky ellipses
             ctx.fillStyle = def.dark;
             for (const [tx, ty] of [[0, -s*0.20], [-s*0.22, s*0.10], [s*0.22, s*0.10]]) {
                 ctx.beginPath();
@@ -251,15 +259,15 @@ function drawHexFn(ctx, hex, props, hexMap) {
             }
             break;
         }
-
-        // plain: fill colour is enough
     }
 
     ctx.restore();
 }
 
 // ── drawEdgeFn ────────────────────────────────────────────────────────────────
-// Draws a styled line along the shared hex edge.
+// Roads draw center-to-midpoint from both adjacent hexes (creating a visual
+// road line that passes through the hex centers). All other edge types draw
+// a full corner-to-corner line along the shared hex boundary.
 
 function drawEdgeFn(ctx, geom, props, hexMap) {
     const def = EDGE[props?.type];
@@ -271,14 +279,27 @@ function drawEdgeFn(ctx, geom, props, hexMap) {
     ctx.strokeStyle = def.color;
     ctx.lineWidth   = def.width / zoom;
     ctx.lineCap     = 'round';
-    if (def.dash.length) ctx.setLineDash(def.dash.map(d => d / zoom));
 
-    ctx.beginPath();
-    ctx.moveTo(geom.x0, geom.y0);
-    ctx.lineTo(geom.x1, geom.y1);
-    ctx.stroke();
+    if (props.type === 'road') {
+        // Draw from canonical hex centre to edge midpoint, and neighbour centre to midpoint.
+        // Together these form a continuous road line through both hex centres.
+        ctx.beginPath();
+        ctx.moveTo(geom.cx, geom.cy);
+        ctx.lineTo(geom.mx, geom.my);
+        if (geom.nbrRow >= 0) {
+            const nbr = Geometry.offsetToPixel(geom.nbrRow, geom.nbrCol, hexMap._layout);
+            ctx.moveTo(nbr.x, nbr.y);
+            ctx.lineTo(geom.mx, geom.my);
+        }
+        ctx.stroke();
+    } else {
+        // Corner-to-corner line along the edge boundary
+        ctx.beginPath();
+        ctx.moveTo(geom.x0, geom.y0);
+        ctx.lineTo(geom.x1, geom.y1);
+        ctx.stroke();
+    }
 
-    if (def.dash.length) ctx.setLineDash([]);
     ctx.restore();
 }
 
@@ -290,24 +311,20 @@ function buildTerrainGrid(hexMap) {
 
     function inBounds(r, c) { return r >= 0 && r < ROWS && c >= 0 && c < COLS; }
 
-    function neighbors(r, c) {
+    function nbrs(r, c) {
         return Geometry.offsetNeighbors(r, c, orientation, parity).filter(n => inBounds(n.row, n.col));
     }
 
-    // Blob growth: pick random seeds, expand into plain hexes with decreasing probability
     function growBlob(terrain, numSeeds, maxSize, spreadProb) {
         const frontier = [];
         for (let i = 0; i < numSeeds; i++) {
             const r = (Math.random() * ROWS) | 0;
             const c = (Math.random() * COLS) | 0;
-            if (grid[r][c] === 'plain') {
-                grid[r][c] = terrain;
-                frontier.push({ row: r, col: c });
-            }
+            if (grid[r][c] === 'plain') { grid[r][c] = terrain; frontier.push({ row: r, col: c }); }
         }
         let fi = 0, count = frontier.length;
         while (fi < frontier.length && count < maxSize) {
-            for (const n of neighbors(frontier[fi].row, frontier[fi].col)) {
+            for (const n of nbrs(frontier[fi].row, frontier[fi].col)) {
                 if (grid[n.row][n.col] === 'plain' && Math.random() < spreadProb) {
                     grid[n.row][n.col] = terrain;
                     frontier.push(n);
@@ -328,44 +345,77 @@ function buildTerrainGrid(hexMap) {
     return grid;
 }
 
+// Contiguous random walk placing edge features.
+// Returns the final (row, col) so callers can chain walks if needed.
+function randomWalk(layer, grid, hexMap, startR, startC, type, minLen, maxLen, avoidWater) {
+    const { orientation, parity } = hexMap._layout;
+    const length   = minLen + (Math.random() * (maxLen - minLen + 1)) | 0;
+    let r = startR, c = startC, lastEdge = -1;
+
+    for (let step = 0; step < length; step++) {
+        const allNbrs = Geometry.offsetNeighbors(r, c, orientation, parity);
+        const valid   = [];
+        for (let e = 0; e < 6; e++) {
+            if (lastEdge >= 0 && e === (lastEdge + 3) % 6) continue; // no U-turn
+            const n = allNbrs[e];
+            if (n.row < 0 || n.row >= ROWS || n.col < 0 || n.col >= COLS) continue;
+            if (avoidWater && grid[n.row][n.col] === 'water') continue;
+            valid.push({ e, row: n.row, col: n.col });
+        }
+        if (valid.length === 0) break;
+
+        const pick = valid[(Math.random() * valid.length) | 0];
+        layer.setEdge(r, c, pick.e, { type });
+        lastEdge = pick.e;
+        r = pick.row;
+        c = pick.col;
+    }
+}
+
+function randomNonWaterHex(grid) {
+    let r, c, attempts = 0;
+    do {
+        r = (Math.random() * ROWS) | 0;
+        c = (Math.random() * COLS) | 0;
+    } while (grid[r][c] === 'water' && ++attempts < 40);
+    return grid[r][c] === 'water' ? null : { r, c };
+}
+
 function placeEdges(layer, grid, hexMap) {
     const { orientation, parity } = hexMap._layout;
     const lowland = new Set(['plain', 'forest', 'desert', 'swamp']);
 
+    // Cliffs and walls: terrain-adjacency based (processed once per physical edge)
     for (let r = 0; r < ROWS; r++) {
         for (let c = 0; c < COLS; c++) {
-            const nbrs = Geometry.offsetNeighbors(r, c, orientation, parity);
-
+            const allNbrs = Geometry.offsetNeighbors(r, c, orientation, parity);
             for (let e = 0; e < 6; e++) {
-                const n = nbrs[e];
+                const n = allNbrs[e];
                 if (n.row < 0 || n.row >= ROWS || n.col < 0 || n.col >= COLS) continue;
-
-                // Process each physical edge once (from the lower-indexed hex side)
-                if (n.row < r || (n.row === r && n.col <= c)) continue;
+                if (n.row < r || (n.row === r && n.col <= c)) continue; // each edge once
 
                 const tA = grid[r][c], tB = grid[n.row][n.col];
 
-                // River: marks the boundary between water and land
-                if ((tA === 'water') !== (tB === 'water')) {
-                    if (Math.random() < 0.65) { layer.setEdge(r, c, e, { type: 'river' }); continue; }
-                }
-
-                // Cliff: sharp drop from mountain to lowland
                 if ((tA === 'mountain' && lowland.has(tB)) || (tB === 'mountain' && lowland.has(tA))) {
                     if (Math.random() < 0.38) { layer.setEdge(r, c, e, { type: 'cliff' }); continue; }
                 }
-
-                // Wall: fortification along mountain ridges
                 if (tA === 'mountain' && tB === 'mountain') {
-                    if (Math.random() < 0.18) { layer.setEdge(r, c, e, { type: 'wall' }); continue; }
-                }
-
-                // Road: sparse tracks through plain and forest
-                if ((tA === 'plain' || tA === 'forest') && (tB === 'plain' || tB === 'forest')) {
-                    if (Math.random() < 0.045) { layer.setEdge(r, c, e, { type: 'road' }); }
+                    if (Math.random() < 0.18) layer.setEdge(r, c, e, { type: 'wall' });
                 }
             }
         }
+    }
+
+    // Rivers: contiguous walks through non-water terrain (inland rivers/streams)
+    for (let i = 0; i < 6; i++) {
+        const start = randomNonWaterHex(grid);
+        if (start) randomWalk(layer, grid, hexMap, start.r, start.c, 'river', 5, 14, true);
+    }
+
+    // Roads: contiguous walks through non-water terrain
+    for (let i = 0; i < 8; i++) {
+        const start = randomNonWaterHex(grid);
+        if (start) randomWalk(layer, grid, hexMap, start.r, start.c, 'road', 4, 11, true);
     }
 }
 
@@ -397,7 +447,7 @@ function makeLegendPanel() {
     return panel;
 }
 
-// ── Map build + controls ──────────────────────────────────────────────────────
+// ── Map build ─────────────────────────────────────────────────────────────────
 
 let map, terrainLayer, edgesLayer, infoPanel;
 
@@ -407,19 +457,14 @@ function buildMap() {
 
     if (map) map.destroy();
 
-    // Two separate HexDetailsLayer instances: one for hex terrain fills,
-    // one for edge features. Independent visibility toggles.
     terrainLayer = new HexDetailsLayer('terrain', {
-        mode:          'complete',
-        rows:          ROWS,
-        cols:          COLS,
+        mode: 'complete', rows: ROWS, cols: COLS,
         drawHexFn,
-        drawUnset:     true,   // draw every hex, even with null props (shows plain base)
+        drawUnset:     true,
         minScreenSize: minSize,
     });
 
     edgesLayer = new HexDetailsLayer('edges', {
-        // sparse (default): only hexes with edge records need storage
         drawEdgeFn,
         minScreenSize: minSize,
     });
@@ -434,10 +479,8 @@ function buildMap() {
         background: '#0a1420',
     });
 
-    // Layer order bottom → top:
-    //   terrainLayer, hex-outline, hex-label, center-dot, edgesLayer, legend, info
-    map.addLayer(terrainLayer, 0);  // below the built-in outline/label/dot layers
-    map.addLayer(edgesLayer);       // above outlines so edge lines are unobscured
+    map.addLayer(terrainLayer, 0);  // below built-in outline/label layers
+    map.addLayer(edgesLayer);       // above outlines
     map.addLayer(makeLegendPanel());
     map.addLayer(infoPanel);
 
@@ -447,30 +490,23 @@ function buildMap() {
     map.setLayerVisible('hex-label',   document.getElementById('chk-labels').checked);
     map.setLayerVisible('center-dot',  false);
 
-    // Generate terrain and edge data
     const grid = buildTerrainGrid(map);
-
     for (let r = 0; r < ROWS; r++)
         for (let c = 0; c < COLS; c++)
             terrainLayer.setHex(r, c, { terrain: grid[r][c] });
-
     placeEdges(edgesLayer, grid, map);
 
-    // Hover: update status bar and info panel
     map.on('hexHover', ({ row, col }) => {
-        const hProps  = terrainLayer.getHex(row, col);
-        const tDef    = TERRAIN[hProps?.terrain] ?? TERRAIN.plain;
+        const hProps    = terrainLayer.getHex(row, col);
+        const tDef      = TERRAIN[hProps?.terrain] ?? TERRAIN.plain;
         const edgeParts = [];
-
         for (let e = 0; e < 6; e++) {
             const ep = edgesLayer.getEdge(row, col, e);
             if (ep?.type) edgeParts.push(`e${e}:${EDGE[ep.type]?.name ?? ep.type}`);
         }
-
         document.getElementById('status').textContent =
             `(${String(row).padStart(2,'0')},${String(col).padStart(2,'0')})  ${tDef.name}` +
             (edgeParts.length ? `  [${edgeParts.join('  ')}]` : '');
-
         infoPanel.html =
             `<div style="color:#6ab0d8;font-weight:bold;margin-bottom:5px">` +
             `(${String(row).padStart(2,'0')},${String(col).padStart(2,'0')})</div>` +
@@ -484,12 +520,27 @@ function buildMap() {
                 : '');
     });
 
+    map.on('viewportChange', () => {
+        document.getElementById('rot-val').textContent = `${map.getRotation()}°`;
+    });
+
+    document.getElementById('rot-val').textContent = `${map.getRotation()}°`;
     map.fitToView();
 }
 
-// Controls
+// ── Controls ──────────────────────────────────────────────────────────────────
+
 document.getElementById('btn-regen').addEventListener('click', buildMap);
 document.getElementById('btn-fit').addEventListener('click',   () => map && map.fitToView());
+
+document.getElementById('btn-ccw').addEventListener('click', () => {
+    map.rotateBy(-1);
+    document.getElementById('rot-val').textContent = `${map.getRotation()}°`;
+});
+document.getElementById('btn-cw').addEventListener('click', () => {
+    map.rotateBy(1);
+    document.getElementById('rot-val').textContent = `${map.getRotation()}°`;
+});
 
 document.getElementById('chk-terrain').addEventListener('change', e => map.setLayerVisible('terrain',     e.target.checked));
 document.getElementById('chk-edges'  ).addEventListener('change', e => map.setLayerVisible('edges',       e.target.checked));

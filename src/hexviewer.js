@@ -444,6 +444,7 @@ class HexDetailsLayer extends Layer {
         const nbr = this._neighborCoords(hex.row, hex.col, e);
         return {
             row: hex.row,            col: hex.col,            edge: e,
+            cx:  hex.cx,             cy:  hex.cy,
             x0:  hex.cx + co[e].dx,  y0: hex.cy + co[e].dy,
             x1:  hex.cx + co[e1].dx, y1: hex.cy + co[e1].dy,
             mx:  hex.cx + off.dmx,   my: hex.cy + off.dmy,

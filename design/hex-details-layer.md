@@ -165,6 +165,7 @@ so the function does not need to recompute trig.
 drawEdgeFn(ctx, edgeGeom, props, hexMap)
 // edgeGeom — {
 //   row, col, edge,           // canonical hex/edge identity
+//   cx, cy,                   // world-space centre of the canonical hex
 //   x0, y0,                   // world-space first corner
 //   x1, y1,                   // world-space second corner
 //   mx, my,                   // midpoint
