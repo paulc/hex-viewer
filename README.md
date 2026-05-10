@@ -14,6 +14,7 @@ src/
   image-layer.js        image layer module (exposes window.HexViewer.ImageLayer)
   map-details-layer.js  connectors and hex-edge borders (exposes window.HexViewer.MapDetailsLayer)
   hex-pathfinder.js     A* path along hex edges (exposes window.HexViewer.findPath)
+  hex-movement.js       hex-to-hex movement pathfinding: findPath, reachableHexes, pathCost
 ```
 
 Game-specific modules can be added under `src/` and loaded with additional `<script>` tags.
@@ -818,6 +819,114 @@ if (segs) detailsLayer.addBorderSegments(segs, { color: '#ff8800', width: 3 });
 The vertex graph has one node per hex corner (geometric point), with three edges at each interior vertex (one per adjacent hex edge). Each edge has cost 1 (all hex edges are the same length), so the shortest path minimises edge count. A* with the Euclidean heuristic guides expansion toward the goal and naturally selects the most direct route among ties.
 
 Node identity uses a rounded world-position key (`Math.round(x * 100), Math.round(y * 100)`) to handle the fact that each geometric vertex is shared by up to three hexes and would otherwise appear as multiple `{row, col, vertex}` specs.
+
+---
+
+## Hex movement (`src/hex-movement.js`)
+
+Load after `hexviewer.js`. Adds `findPath`, `reachableHexes`, and `pathCost` to `window.HexViewer`.
+
+```html
+<script src="src/hexviewer.js"></script>
+<script src="src/hex-movement.js"></script>
+```
+
+All three functions accept a `HexDetailsLayer` as their terrain data source and a `costFn` callback that encodes all movement rules for a particular unit type.
+
+### costFn signature
+
+```js
+costFn(fromRow, fromCol, toRow, toCol, edge, hexProps, edgeProps, unitType, context)
+// → number | Infinity
+```
+
+| Parameter | Description |
+|---|---|
+| `fromRow`, `fromCol` | Origin hex |
+| `toRow`, `toCol` | Destination hex |
+| `edge` | Cube-direction edge index (0–5) being crossed |
+| `hexProps` | `layer.getHex(toRow, toCol)` — destination hex properties (may be `null`) |
+| `edgeProps` | `layer.getEdge(fromRow, fromCol, edge)` — shared boundary properties (may be `null`) |
+| `unitType` | Application-defined value passed through from the pathfinding call |
+| `context` | Optional extra data from `options.context` (weather, supply, etc.) |
+
+Return `Infinity` to block a transition entirely. Negative costs are also treated as blocked.
+
+If edge data lives in a separate layer from hex data, query it directly via closure — the pathfinder only queries one layer for both.
+
+### findPath
+
+A* (Dijkstra when `heuristic` is omitted) from one hex to another.
+
+```js
+HexViewer.findPath(layer, startRow, startCol, endRow, endCol, costFn, unitType, options)
+// → { path: [{row, col}, ...], cost: number } | null
+```
+
+`path` is inclusive of both endpoints. Returns `null` if the destination is unreachable.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `context` | any | `null` | Passed through to `costFn` |
+| `heuristic` | function | `() => 0` | `(fromRow, fromCol, toRow, toCol, hexMap) → number` — must be admissible (never exceed true remaining cost) |
+
+### reachableHexes
+
+Dijkstra flood-fill collecting every hex reachable within a movement budget.
+
+```js
+HexViewer.reachableHexes(layer, startRow, startCol, maxCost, costFn, unitType, options)
+// → Map<"row,col", { row, col, cost }>
+```
+
+The returned `Map` includes the origin hex at cost `0`. Key format is `"row,col"`.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `context` | any | `null` | Passed through to `costFn` |
+
+### pathCost
+
+Computes the total movement cost of a caller-specified sequence of hexes.
+
+```js
+HexViewer.pathCost(layer, pathArray, costFn, unitType, options)
+// → { cost: number, blocked: boolean }
+```
+
+`pathArray` is `[{row, col}, ...]`. `blocked` is `true` if any step is non-adjacent or returns `Infinity`. Returns `{ cost: 0, blocked: false }` for paths shorter than two hexes.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `context` | any | `null` | Passed through to `costFn` |
+
+### Example
+
+```js
+const INFANTRY = { name: 'infantry', wheeled: false, naval: false };
+
+function costFn(fromR, fromC, toR, toC, edge, hexProps, edgeProps, unitType) {
+    const terrain = hexProps?.terrain ?? 'plain';
+    if (terrain === 'water') return Infinity;
+    let cost = { plain: 1, forest: 2, mountain: 3, desert: 2, swamp: 3 }[terrain] ?? 1;
+    if (edgeProps?.type === 'river') cost += 1;
+    if (edgeProps?.type === 'road')  cost  = Math.max(0.5, cost * 0.5);
+    return cost;
+}
+
+// Shortest path
+const result = HexViewer.findPath(layer, 0, 0, 10, 15, costFn, INFANTRY);
+if (result) console.log(`${result.path.length} hexes, cost ${result.cost}`);
+
+// Reachable hexes within 6 movement points
+const reach = HexViewer.reachableHexes(layer, 5, 5, 6, costFn, INFANTRY);
+console.log(`${reach.size} hexes reachable`);
+
+// Cost of a hand-drawn path
+const { cost, blocked } = HexViewer.pathCost(layer, [
+    { row: 0, col: 0 }, { row: 0, col: 1 }, { row: 1, col: 1 }
+], costFn, INFANTRY);
+```
 
 ---
 
