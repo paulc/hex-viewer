@@ -204,6 +204,256 @@ class CenterDotLayer extends Layer {
     }
 }
 
+// -- HexDetailsLayer -----------------------------------------------------------
+
+class HexDetailsLayer extends Layer {
+    constructor(name, options = {}) {
+        super(name, options.visible !== false);
+        const {
+            mode          = 'sparse',
+            rows,
+            cols,
+            drawHexFn     = null,
+            drawEdgeFn    = null,
+            drawUnset     = false,
+            minScreenSize = 4,
+        } = options;
+
+        this._mode         = mode;
+        this._rows         = rows ?? 0;
+        this._cols         = cols ?? 0;
+        this._drawHexFn    = drawHexFn;
+        this._drawEdgeFn   = drawEdgeFn;
+        this._drawUnset    = drawUnset;
+        this.minScreenSize = minScreenSize;
+
+        if (mode === 'complete') {
+            if (!rows || !cols) throw new Error('HexDetailsLayer: complete mode requires rows and cols');
+            this._hexGrid = Array.from({ length: rows }, () => new Array(cols).fill(null));
+        } else {
+            this._hexData = new Map();
+        }
+        this._edgeData        = new Map();
+        this._edgeGeomOffsets = null;
+    }
+
+    // -- Lifecycle ---------------------------------------------------------------
+
+    onAttach(hexMap) {
+        this._hexMap = hexMap;
+        this._precomputeEdgeGeomOffsets(hexMap);
+    }
+
+    onDetach() {
+        this._hexMap          = null;
+        this._edgeGeomOffsets = null;
+    }
+
+    // -- Hex operations ----------------------------------------------------------
+
+    setHex(row, col, props) {
+        if (this._mode === 'sparse') {
+            const key      = `${row},${col}`;
+            const existing = this._hexData.get(key);
+            if (existing) Object.assign(existing, props);
+            else          this._hexData.set(key, Object.assign({}, props));
+        } else {
+            if (!this._hexGrid[row][col]) this._hexGrid[row][col] = {};
+            Object.assign(this._hexGrid[row][col], props);
+        }
+        if (this._hexMap) this._hexMap._scheduleRender();
+        return this;
+    }
+
+    getHex(row, col) {
+        if (this._mode === 'sparse') return this._hexData.get(`${row},${col}`) ?? null;
+        if (row < 0 || row >= this._rows || col < 0 || col >= this._cols) return null;
+        return this._hexGrid[row][col];
+    }
+
+    clearHex(row, col) {
+        if (this._mode === 'sparse') {
+            this._hexData.delete(`${row},${col}`);
+        } else {
+            if (row >= 0 && row < this._rows && col >= 0 && col < this._cols)
+                this._hexGrid[row][col] = null;
+        }
+        if (this._hexMap) this._hexMap._scheduleRender();
+        return this;
+    }
+
+    hasHex(row, col) {
+        if (this._mode === 'sparse') return this._hexData.has(`${row},${col}`);
+        if (row < 0 || row >= this._rows || col < 0 || col >= this._cols) return false;
+        return this._hexGrid[row][col] !== null;
+    }
+
+    forEachHex(fn) {
+        if (this._mode === 'sparse') {
+            for (const [key, props] of this._hexData) {
+                const i = key.indexOf(',');
+                fn(+key.slice(0, i), +key.slice(i + 1), props);
+            }
+        } else {
+            for (let r = 0; r < this._rows; r++)
+                for (let c = 0; c < this._cols; c++)
+                    if (this._hexGrid[r][c]) fn(r, c, this._hexGrid[r][c]);
+        }
+    }
+
+    // -- Edge operations ---------------------------------------------------------
+
+    setEdge(row, col, edge, props) {
+        const key      = `${row},${col},${edge}`;
+        const existing = this._edgeData.get(key);
+        if (existing) Object.assign(existing, props);
+        else          this._edgeData.set(key, Object.assign({}, props));
+        if (this._hexMap) this._hexMap._scheduleRender();
+        return this;
+    }
+
+    getEdge(row, col, edge) {
+        const own   = this._edgeData.get(`${row},${col},${edge}`) ?? null;
+        const nbr   = this._neighborCoords(row, col, edge);
+        const other = nbr ? (this._edgeData.get(`${nbr.row},${nbr.col},${(edge + 3) % 6}`) ?? null) : null;
+        if (!own && !other) return null;
+        if (!other) return own;
+        if (!own)   return other;
+        return { ...other, ...own };
+    }
+
+    getEdgeOwn(row, col, edge) {
+        return this._edgeData.get(`${row},${col},${edge}`) ?? null;
+    }
+
+    clearEdge(row, col, edge) {
+        this._edgeData.delete(`${row},${col},${edge}`);
+        if (this._hexMap) this._hexMap._scheduleRender();
+        return this;
+    }
+
+    hasEdge(row, col, edge) {
+        if (this._edgeData.has(`${row},${col},${edge}`)) return true;
+        const nbr = this._neighborCoords(row, col, edge);
+        return nbr ? this._edgeData.has(`${nbr.row},${nbr.col},${(edge + 3) % 6}`) : false;
+    }
+
+    forEachEdge(fn) {
+        for (const [key, props] of this._edgeData) {
+            const i1 = key.indexOf(',');
+            const i2 = key.indexOf(',', i1 + 1);
+            fn(+key.slice(0, i1), +key.slice(i1 + 1, i2), +key.slice(i2 + 1), props);
+        }
+    }
+
+    // -- Serialisation -----------------------------------------------------------
+
+    toJSON() {
+        const hexes = [], edges = [];
+        this.forEachHex((row, col, props) => hexes.push({ row, col, props: { ...props } }));
+        this.forEachEdge((row, col, edge, props) => edges.push({ row, col, edge, props: { ...props } }));
+        return { hexes, edges };
+    }
+
+    fromJSON(data, options = {}) {
+        if (options.replace) {
+            if (this._mode === 'sparse') {
+                this._hexData.clear();
+            } else {
+                for (let r = 0; r < this._rows; r++)
+                    for (let c = 0; c < this._cols; c++)
+                        this._hexGrid[r][c] = null;
+            }
+            this._edgeData.clear();
+        }
+        for (const { row, col, props }            of (data.hexes ?? [])) this.setHex(row, col, props);
+        for (const { row, col, edge, props }      of (data.edges ?? [])) this.setEdge(row, col, edge, props);
+        return this;
+    }
+
+    // -- Render ------------------------------------------------------------------
+
+    render(ctx, hexMap, visibleHexes) {
+        if (hexMap._layout.size * hexMap._viewport.zoom < this.minScreenSize) return;
+
+        if (this._drawHexFn) {
+            for (const hex of visibleHexes) {
+                const props = this.getHex(hex.row, hex.col);
+                if (props !== null || this._drawUnset) {
+                    this._drawHexFn(ctx, hex, props, hexMap);
+                }
+            }
+        }
+
+        if (this._drawEdgeFn && this._edgeData.size > 0) {
+            const drawn = new Set();
+            for (const hex of visibleHexes) {
+                for (let e = 0; e < 6; e++) {
+                    const key = this._canonicalEdgeKey(hex.row, hex.col, e);
+                    if (drawn.has(key)) continue;
+                    drawn.add(key);
+                    const props = this.getEdge(hex.row, hex.col, e);
+                    if (props) this._drawEdgeFn(ctx, this._buildEdgeGeom(hex, e), props, hexMap);
+                }
+            }
+        }
+    }
+
+    // -- Private -----------------------------------------------------------------
+
+    _neighborCoords(row, col, edge) {
+        if (!this._hexMap) return null;
+        const { orientation, parity } = this._hexMap._layout;
+        const axial = Geometry.offsetToAxial(row, col, orientation, parity);
+        const d     = CUBE_DIRECTIONS[edge];
+        const n     = Geometry.axialToOffset(axial.q + d.q, axial.r + d.r, orientation, parity);
+        if (n.row < 0 || n.row >= this._hexMap._rows ||
+            n.col < 0 || n.col >= this._hexMap._cols) return null;
+        return n;
+    }
+
+    _canonicalEdgeKey(row, col, edge) {
+        const nbr = this._neighborCoords(row, col, edge);
+        if (!nbr) return `${row},${col},${edge}`;
+        const nr = nbr.row, nc = nbr.col, ne = (edge + 3) % 6;
+        if (row < nr || (row === nr && col < nc) || (row === nr && col === nc && edge < ne))
+            return `${row},${col},${edge}`;
+        return `${nr},${nc},${ne}`;
+    }
+
+    _precomputeEdgeGeomOffsets(hexMap) {
+        const co = hexMap.cornerOffsets;
+        this._edgeGeomOffsets = Array.from({ length: 6 }, (_, e) => {
+            const e1  = (e + 1) % 6;
+            const dmx = (co[e].dx + co[e1].dx) / 2;
+            const dmy = (co[e].dy + co[e1].dy) / 2;
+            // Outward unit normal: perpendicular to edge vector, pointing away from center
+            const ex  = co[e1].dx - co[e].dx;
+            const ey  = co[e1].dy - co[e].dy;
+            let nx = -ey, ny = ex;
+            if (nx * dmx + ny * dmy < 0) { nx = ey; ny = -ex; }
+            const len = Math.sqrt(nx * nx + ny * ny);
+            return { dmx, dmy, nx: nx / len, ny: ny / len };
+        });
+    }
+
+    _buildEdgeGeom(hex, e) {
+        const co  = this._hexMap.cornerOffsets;
+        const off = this._edgeGeomOffsets[e];
+        const e1  = (e + 1) % 6;
+        const nbr = this._neighborCoords(hex.row, hex.col, e);
+        return {
+            row: hex.row,            col: hex.col,            edge: e,
+            x0:  hex.cx + co[e].dx,  y0: hex.cy + co[e].dy,
+            x1:  hex.cx + co[e1].dx, y1: hex.cy + co[e1].dy,
+            mx:  hex.cx + off.dmx,   my: hex.cy + off.dmy,
+            nx:  off.nx,             ny: off.ny,
+            nbrRow: nbr ? nbr.row : -1,
+            nbrCol: nbr ? nbr.col : -1,
+        };
+    }
+}
+
 // -- DomLayer / PanelLayer -----------------------------------------------------
 
 // Base class for layers that live in the DOM overlay rather than the canvas.
@@ -975,6 +1225,7 @@ window.HexViewer = {
     HexOutlineLayer,
     HexLabelLayer,
     CenterDotLayer,
+    HexDetailsLayer,
     DomLayer,
     PanelLayer,
     MinimapLayer,
