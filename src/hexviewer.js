@@ -541,7 +541,7 @@ class HexMap {
 
         const sr = startRow, sc = startCol;
         this._getHexLabel = getHexLabel || ((row, col) =>
-            `${String(row + sr).padStart(2, '0')}${String(col + sc).padStart(2, '0')}`
+            `${String(col + sc).padStart(2, '0')}${String(row + sr).padStart(2, '0')}`
         );
 
         this._viewport = { panX: 0, panY: 0, zoom: 1, angle: 0 };
